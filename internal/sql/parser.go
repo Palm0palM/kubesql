@@ -1,0 +1,101 @@
+package sql
+
+import (
+	"fmt"
+	"strings"
+)
+
+type parser struct {
+	lexer *lexer
+	token token
+	err   error
+}
+
+// Parse accepts one SELECT statement, an optional semicolon, and then EOF.
+// It performs no Kubernetes requests or table/column validation.
+func Parse(input string) (*SelectStatement, error) {
+	p := &parser{lexer: newLexer(input)}
+	p.advance()
+	stmt, err := p.selectStatement()
+	if err != nil {
+		return nil, err
+	}
+	if p.token.kind == tokenSemicolon {
+		p.advance()
+	}
+	if err := p.require(tokenEOF, "语句结束"); err != nil {
+		return nil, err
+	}
+	return stmt, nil
+}
+
+func (p *parser) advance() {
+	if p.err == nil {
+		p.token, p.err = p.lexer.next()
+	}
+}
+
+func (p *parser) require(kind tokenKind, expected string) error {
+	if p.err != nil {
+		return p.err
+	}
+	if p.token.kind != kind {
+		found := p.token.text
+		if p.token.kind == tokenEOF {
+			found = "EOF"
+		}
+		return &ParseError{
+			Code: "E_PARSE", Position: p.token.start,
+			Message: fmt.Sprintf("这里需要%s，却遇到了 %s", expected, found),
+		}
+	}
+	return nil
+}
+
+func (p *parser) selectStatement() (*SelectStatement, error) {
+	if err := p.require(tokenSelect, "SELECT"); err != nil {
+		return nil, err
+	}
+	p.advance()
+	stmt := &SelectStatement{Type: "select"}
+	if p.token.kind == tokenStar && p.err == nil {
+		stmt.Columns = []Column{{Type: "star", Position: p.token.start}}
+		p.advance()
+	} else {
+		columns, err := p.columnList()
+		if err != nil {
+			return nil, err
+		}
+		stmt.Columns = columns
+	}
+	if err := p.require(tokenFrom, "FROM"); err != nil {
+		return nil, err
+	}
+	p.advance()
+	if err := p.require(tokenIdentifier, "表名"); err != nil {
+		return nil, err
+	}
+	stmt.Table = strings.ToLower(p.token.text)
+	p.advance()
+	return stmt, nil
+}
+
+func (p *parser) columnList() ([]Column, error) {
+	var columns []Column
+	for {
+		if err := p.require(tokenIdentifier, "列名"); err != nil {
+			return nil, err
+		}
+		columns = append(columns, Column{
+			Type: "column", Name: strings.ToLower(p.token.text), Position: p.token.start,
+		})
+		p.advance()
+		if p.err != nil {
+			return nil, p.err
+		}
+		if p.token.kind != tokenComma {
+			return columns, nil
+		}
+		p.advance()
+	}
+}
