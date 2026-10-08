@@ -1,3 +1,6 @@
 .idea/
 *.lock
 .env
+KubeSQL.pdf
+tmp
+docs
