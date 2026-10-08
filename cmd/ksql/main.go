@@ -1,16 +1,17 @@
 package main
 
 import (
-	"fmt"
-	"io"
+	"context"
 	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/Palm0palM/kubesql/internal/cli"
 )
 
 func main() {
-	os.Exit(run(os.Stderr))
-}
-
-func run(stderr io.Writer) int {
-	fmt.Fprintln(stderr, "ksql: SQL execution is not implemented yet")
-	return 1
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := cli.Run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
+	stop()
+	os.Exit(code)
 }
