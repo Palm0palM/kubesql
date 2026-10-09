@@ -69,6 +69,9 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	defer cancel()
 	rows, err := query.Execute(ctx, client, namespace, *all)
 	if err != nil {
+		if semantic, ok := errors.AsType[*engine.Error](err); ok {
+			return fail(stderr, 2, semantic)
+		}
 		return fail(stderr, 1, diagnostic{Code: "E_API", Message: err.Error(), Reason: string(apierrors.ReasonForError(err))})
 	}
 	if err := json.NewEncoder(stdout).Encode(rows); err != nil {

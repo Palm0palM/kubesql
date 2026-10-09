@@ -9,7 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// Error is a semantic error, detected before accessing Kubernetes.
+// Error is a semantic/type error; known schema errors precede API requests.
 type Error struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -20,6 +20,7 @@ func (e *Error) Error() string { return e.Message }
 type column struct {
 	name string
 	path []string
+	kind valueKind
 }
 
 type table struct {
@@ -31,24 +32,24 @@ type table struct {
 var tables = map[string]table{
 	"namespaces": {
 		gvr:     schema.GroupVersionResource{Version: "v1", Resource: "namespaces"},
-		columns: []column{{"name", []string{"metadata", "name"}}},
+		columns: []column{{"name", []string{"metadata", "name"}, stringKind}},
 	},
 	"deployments": {
 		gvr:        schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
 		namespaced: true,
 		columns: []column{
-			{"name", []string{"metadata", "name"}},
-			{"namespace", []string{"metadata", "namespace"}},
-			{"replicas", []string{"spec", "replicas"}},
+			{"name", []string{"metadata", "name"}, stringKind},
+			{"namespace", []string{"metadata", "namespace"}, stringKind},
+			{"replicas", []string{"spec", "replicas"}, numberKind},
 		},
 	},
 	"ingresses": {
 		gvr:        schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "ingresses"},
 		namespaced: true,
 		columns: []column{
-			{"name", []string{"metadata", "name"}},
-			{"namespace", []string{"metadata", "namespace"}},
-			{"default_backend_service", []string{"spec", "defaultBackend", "service", "name"}},
+			{"name", []string{"metadata", "name"}, stringKind},
+			{"namespace", []string{"metadata", "namespace"}, stringKind},
+			{"default_backend_service", []string{"spec", "defaultBackend", "service", "name"}, stringKind},
 		},
 	},
 }
@@ -57,6 +58,7 @@ var tables = map[string]table{
 type Query struct {
 	table   table
 	columns []column
+	where   *boundExpression
 }
 
 // Bind validates every column, including for an empty result, without API calls.
@@ -66,6 +68,16 @@ func Bind(stmt *sql.SelectStatement) (*Query, error) {
 		return nil, &Error{Code: "E_UNKNOWN_TABLE", Message: fmt.Sprintf("unknown table %q", stmt.Table)}
 	}
 	q := &Query{table: t}
+	if stmt.Where != nil {
+		where, err := bindExpression(stmt.Where, t)
+		if err != nil {
+			return nil, err
+		}
+		if !booleanKind(where.kind) {
+			return nil, typeError("WHERE requires a boolean expression")
+		}
+		q.where = where
+	}
 	if len(stmt.Columns) == 1 && stmt.Columns[0].Type == "star" {
 		q.columns = t.columns
 		return q, nil
@@ -107,11 +119,24 @@ func (q *Query) Execute(ctx context.Context, client Lister, namespace string, al
 	}
 	rows := make([]map[string]any, 0, len(objects))
 	for _, object := range objects {
+		if q.where != nil {
+			result, err := q.where.evaluate(object)
+			if err != nil {
+				return nil, err
+			}
+			matched, err := result.asTruth()
+			if err != nil {
+				return nil, err
+			}
+			if matched != trueTruth {
+				continue
+			}
+		}
 		row := make(map[string]any, len(q.columns))
 		for _, c := range q.columns {
-			value, _, err := unstructured.NestedFieldNoCopy(object.Object, c.path...)
+			value, err := readColumn(object, c)
 			if err != nil {
-				return nil, fmt.Errorf("cannot read column %q: invalid resource field structure", c.name)
+				return nil, err
 			}
 			row[c.name] = value
 		}

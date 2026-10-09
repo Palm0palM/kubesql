@@ -95,6 +95,10 @@ func TestCLIErrorsBeforeAPI(t *testing.T) {
 		{"SELECT name, FROM deployments;", "E_PARSE", nil},
 		{"SELECT name FROM ns;", "E_UNKNOWN_TABLE", nil},
 		{"SELECT typo FROM deployments;", "E_UNKNOWN_COLUMN", nil},
+		{"SELECT name FROM deployments WHERE typo IS NULL;", "E_UNKNOWN_COLUMN", nil},
+		{"SELECT name FROM deployments WHERE replicas = '3';", "E_TYPE", nil},
+		{"SELECT name FROM deployments WHERE TRUE OR replicas = '3';", "E_TYPE", nil},
+		{"SELECT name FROM deployments WHERE name;", "E_TYPE", nil},
 		{"SELECT name FROM deployments;", "E_FLAGS", []string{"--output", "yaml"}},
 		{"SELECT name FROM deployments;", "E_FLAGS", []string{"extra"}},
 	} {
@@ -134,5 +138,22 @@ func TestCLIForbiddenAndHelp(t *testing.T) {
 	stderr.Reset()
 	if code := Run(context.Background(), []string{"--help"}, strings.NewReader(""), &stdout, &stderr); code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "kubeconfig") {
 		t.Fatalf("help exit = %d, stdout = %s, stderr = %s", code, &stdout, &stderr)
+	}
+}
+
+func TestCLIWhereRuntimeErrorHasNoPartialOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"apiVersion":"apps/v1","kind":"DeploymentList","items":[{"metadata":{"name":"valid"},"spec":{"replicas":3}},{"metadata":{"name":"invalid"},"spec":{"replicas":"sensitive-payload"}}]}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), []string{"--kubeconfig", configFile(t, server.URL)}, strings.NewReader("SELECT name FROM deployments WHERE replicas >= 2"), &stdout, &stderr)
+	var detail diagnostic
+	if err := json.Unmarshal(stderr.Bytes(), &detail); err != nil || code != 2 || detail.Code != "E_TYPE" || stdout.Len() != 0 {
+		t.Fatalf("exit = %d, stdout = %s, stderr = %s, decode error = %v", code, &stdout, &stderr, err)
+	}
+	if strings.Contains(stderr.String(), "sensitive-payload") {
+		t.Fatal("diagnostic leaked resource value")
 	}
 }
