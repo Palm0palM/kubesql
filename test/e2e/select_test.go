@@ -25,11 +25,9 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-const fixtureNamespace = "sql-easy-select"
-
-func readFixture(t *testing.T, name string) []byte {
+func readFixture(t *testing.T, directory, name string) []byte {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "easy-select", name))
+	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", directory, name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +59,8 @@ func canonicalRows(t *testing.T, data []byte) []string {
 	return result
 }
 
-func TestEasySelect(t *testing.T) {
+func prepareFixture(t *testing.T, directory, fixtureNamespace string) (context.Context, string, []string) {
+	t.Helper()
 	path := os.Getenv("KSQL_E2E_KUBECONFIG")
 	selectedContext := os.Getenv("KSQL_E2E_CONTEXT")
 	binary := os.Getenv("KSQL_E2E_BINARY")
@@ -80,12 +79,12 @@ func TestEasySelect(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
+	t.Cleanup(cancel)
 	namespaces := client.Resource(schema.GroupVersionResource{Version: "v1", Resource: "namespaces"})
 	if _, err := namespaces.Get(ctx, fixtureNamespace, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("fixture namespace must not already exist (or API access failed): %v", err)
 	}
-	decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader(readFixture(t, "fixture.yaml")), 4096)
+	decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader(readFixture(t, directory, "fixture.yaml")), 4096)
 	resources := map[string]schema.GroupVersionResource{
 		"Namespace":  {Version: "v1", Resource: "namespaces"},
 		"Deployment": {Group: "apps", Version: "v1", Resource: "deployments"},
@@ -128,10 +127,15 @@ func TestEasySelect(t *testing.T) {
 			})
 		}
 	}
+	return ctx, binary, []string{"--kubeconfig", path, "--context", selectedContext, "--namespace", fixtureNamespace, "--output", "json"}
+}
+
+func TestEasySelect(t *testing.T) {
+	ctx, binary, args := prepareFixture(t, "easy-select", "sql-easy-select")
 	for _, name := range []string{"namespaces", "deployments", "ingresses"} {
 		t.Run(name, func(t *testing.T) {
-			cmd := exec.CommandContext(ctx, binary, "--kubeconfig", path, "--context", selectedContext, "--namespace", fixtureNamespace, "--output", "json")
-			cmd.Stdin = bytes.NewReader(readFixture(t, name+".sql"))
+			cmd := exec.CommandContext(ctx, binary, args...)
+			cmd.Stdin = bytes.NewReader(readFixture(t, "easy-select", name+".sql"))
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
 			if err := cmd.Run(); err != nil || stderr.Len() != 0 {
@@ -142,7 +146,7 @@ func TestEasySelect(t *testing.T) {
 				if !slices.Contains(got, `{"name":"sql-easy-select"}`) || !slices.Contains(got, `{"name":"default"}`) {
 					t.Fatalf("Namespace table was filtered by namespace: %v", got)
 				}
-			} else if want := canonicalRows(t, readFixture(t, name+".json")); !reflect.DeepEqual(got, want) {
+			} else if want := canonicalRows(t, readFixture(t, "easy-select", name+".json")); !reflect.DeepEqual(got, want) {
 				t.Fatalf("rows = %v, want %v", got, want)
 			}
 		})
