@@ -17,6 +17,7 @@ var keywords = map[string]tokenKind{
 	"AND": tokenAnd, "OR": tokenOr, "NOT": tokenNot, "IS": tokenIs,
 	"NULL": tokenNull, "TRUE": tokenTrue, "FALSE": tokenFalse,
 	"UPDATE": tokenUpdate, "SET": tokenSet, "DELETE": tokenDelete,
+	"INSERT": tokenInsert, "INTO": tokenInto, "VALUES": tokenValues,
 }
 
 func newLexer(input string) *lexer {

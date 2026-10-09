@@ -11,7 +11,7 @@ type parser struct {
 	err   error
 }
 
-// Parse accepts one SELECT, UPDATE or DELETE, an optional semicolon, then EOF.
+// Parse accepts one SELECT, UPDATE, DELETE or INSERT, then optional semicolon/EOF.
 // It performs no Kubernetes requests or table/column validation.
 func Parse(input string) (*Statement, error) {
 	p := &parser{lexer: newLexer(input)}
@@ -19,6 +19,8 @@ func Parse(input string) (*Statement, error) {
 	var stmt *Statement
 	var err error
 	switch p.token.kind {
+	case tokenInsert:
+		stmt, err = p.insertStatement()
 	case tokenUpdate, tokenDelete:
 		stmt, err = p.writeStatement()
 	default:

@@ -59,8 +59,11 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	var query *engine.Query
 	var write *engine.Write
+	var insert *engine.Insert
 	if stmt.Type == "select" {
 		query, err = engine.Bind(stmt)
+	} else if stmt.Type == "insert" {
+		insert, err = engine.BindInsert(stmt, *all)
 	} else {
 		write, err = engine.BindWrite(stmt, *all)
 	}
@@ -75,9 +78,13 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	defer cancel()
 	var outputValue any
 	exitCode := 0
-	if write != nil {
+	if write != nil || insert != nil {
 		var result *engine.WriteResult
-		result, err = write.Execute(ctx, client, namespace)
+		if insert != nil {
+			result, err = insert.Execute(ctx, client, namespace)
+		} else {
+			result, err = write.Execute(ctx, client, namespace)
+		}
 		outputValue = result
 		if result != nil && result.FailedRows != 0 {
 			exitCode = 1

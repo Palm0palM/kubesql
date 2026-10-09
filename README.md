@@ -8,9 +8,9 @@
 
 ## 当前状态
 
-M0–M3 已完成并通过代码审查；M4 UPDATE/DELETE 已实现，等待代码审查。
-CLI 通过官方 client-go dynamic client 读取 Kubernetes，支持连接参数、命名空间选择和 JSON 输出。
-任务书第 2–4 章已通过真实集群 CLI E2E，夹具资源已清理。INSERT 尚未实现。
+M0–M4 已完成并提交；M5 INSERT/manifest 已实现，等待代码审查。
+CLI 通过官方 client-go dynamic client 查询和操作 Kubernetes，支持连接参数、命名空间选择和 JSON 输出。
+任务书第 2–5 章已通过真实集群 CLI E2E，夹具资源已清理；第 1 章通过离线语法测试。
 
 本地设计与计划保存在被忽略的 `docs/` 中，不提供远端不可用的文档链接。
 
@@ -21,15 +21,16 @@ cmd/ksql/       进程入口、信号取消及入口行为测试
 internal/cli/   flags、stdin、错误/结果输出、依赖装配
 internal/sql/   token、lexer、Statement/表达式 AST、递归下降 parser
 internal/engine/ 三表绑定、三值逻辑、过滤/投影、精确 patch 与写入汇总
-internal/kube/  kubeconfig、dynamic client、分页 List/Patch/Delete
+internal/kube/  kubeconfig、dynamic client、分页 List/Patch/Delete/Create
 test/e2e/       显式启用的真实集群 CLI 测试
 testdata/       可复用 YAML、SQL 和预期 JSON
 go.mod/go.sum   Go 版本与固定依赖（client-go/apimachinery v0.35.9）
 ```
 
 SQL 包不依赖 Kubernetes。执行链为 `cli.Run → sql.Parse → engine.Bind → kube.Connect → Query.Execute → Client.List → WHERE 求值 → 投影 → JSON`。
-读操作使用 `Lister`，写操作使用包含 List/Patch/Delete 的 `Writer`；没有提前搭建通用 CRUD 框架。
-`Statement.Type` 区分 select/update/delete，SELECT 使用 Columns，UPDATE 使用 Assignments；三者共用 Table 和 WHERE。
+读操作使用 `Lister`，条件写操作使用 `Writer`，创建使用只含 Create 的 `Creator`；没有提前搭建通用 CRUD 框架。
+`Statement.Type` 区分 select/update/delete/insert；SELECT/INSERT 使用 Columns，UPDATE 使用 Assignments，INSERT 的 Values 表示一个元组。WHERE 仅用于查询和条件写入。
+创建链为 `cli.Run → sql.Parse → engine.BindInsert → kube.Connect → Insert.Execute → Client.Create → WriteResult → JSON`。
 
 提交前已通过 gofmt、`go test ./...`、`go vet ./...` 和 staticcheck v0.8.1。
 Go 更新至 1.27.2 后，staticcheck v0.8.1 原依赖无法读取新版导出格式；使用 x/tools v0.51.0 在本地临时模块中重建工具后检查通过，项目依赖未变。
@@ -60,7 +61,7 @@ go build -o tmp/go-build/ksql ./cmd/ksql
 
 ## 查询语法与连接参数
 
-`internal/sql.Parse` 逐字符扫描并递归下降解析一条 SELECT：
+`internal/sql.Parse` 逐字符扫描并递归下降解析一条 SELECT/UPDATE/DELETE/INSERT，例如：
 
 ```sql
 SELECT name, replicas FROM deployments;
@@ -71,13 +72,13 @@ SELECT * FROM ingresses
 AST 保留独立星号节点，不展开字段、不检查表名或列名是否存在。
 错误为 `E_PARSE`，包含从 1 开始的行列位置。任务书 1-1 的 JSON AST 和 1-2 的第 1 行第 14 列错误均由单元测试验证。
 执行前会检查未知表、未知列和重复列，错误先于 kubeconfig 加载和 API 请求；空查询结果为 `[]`。
-当前不支持双引号标识符、JOIN 或 INSERT，也不增加 `--parse-only` 参数。
+当前不支持双引号标识符、JOIN、Discovery 通用资源、Metrics 或 CRD，也不增加 `--parse-only` 参数。
 
 | 表 | SELECT * 公开列 |
 | --- | --- |
-| namespaces | name、labels、annotations |
-| deployments | name、namespace、replicas、labels、annotations |
-| ingresses | name、namespace、default_backend_service、labels、annotations |
+| namespaces | name、labels、annotations、manifest |
+| deployments | name、namespace、replicas、labels、annotations、manifest |
+| ingresses | name、namespace、default_backend_service、labels、annotations、manifest |
 
 Ingress 无 Service 类型默认后端时输出 JSON null，不使用 rules 后端填充；数字保留数字类型。
 只支持这些复数表名，不支持 deploy/ns 等缩写。
@@ -90,8 +91,8 @@ Ingress 无 Service 类型默认后端时输出 JSON null，不使用 rules 后�
 - 不传 `--kubeconfig` 时使用 client-go 默认加载规则（包括 KUBECONFIG）；不传 context 时使用当前 context。
 - namespace 优先级：`--namespace` > 所选 context 的 namespace > default。
 - `--all-namespaces` 对 Deployment/Ingress 查询全部命名空间；Namespace 表始终查询集群范围。
-- stdout 只输出查询 JSON 数组；错误 JSON 输出到 stderr。退出码：0 成功、1 配置/API/I/O 错误、2 参数/语法/语义错误。
-- 查询总超时 30 秒，Ctrl+C/SIGTERM 取消 API 请求；不等待 Pod Ready。
+- stdout 输出查询 JSON 数组或写入汇总；整语句错误 JSON 输出到 stderr，对象 API 失败包含在 stdout 汇总内。退出码：0 成功、1 配置/API/I/O 错误、2 参数/语法/语义错误。
+- 单条语句总超时 30 秒，Ctrl+C/SIGTERM 取消 API 请求；不等待 Pod Ready。
 
 ### WHERE 过滤（M3）
 
@@ -134,6 +135,36 @@ DELETE FROM deployments WHERE name = 'web';
 - DELETE 带读取对象的 UID/resourceVersion 前置条件，普通删除；API 接受即计成功，不等待消失、不清理 finalizer。
 - labels/annotations 查询返回 API 的 JSON 对象（缺失为 null），SELECT * 随公开列扩展。Controller/API Server 可能随后补回自己的键，如 Deployment revision 注解、Namespace 名称标签；CLI 不隐藏这些真实字段。
 
+### INSERT 与 manifest（M5）
+
+```sql
+INSERT INTO namespaces (manifest)
+VALUES ('{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"example"}}');
+SELECT manifest FROM namespaces WHERE name = 'example';
+```
+
+- 三表均支持单个 VALUES 元组，仅允许 manifest 列和一个 SQL 字符串值。SQL lexer 先解码 `''`，独立 JSON 解码器再处理 JSON 转义；不支持批量创建。
+- manifest 必须是一个完整 JSON 对象；apiVersion/kind 必须分别匹配 v1/Namespace、apps/v1/Deployment、networking.k8s.io/v1/Ingress，metadata.name 必须为非空字符串。本阶段不支持 generateName。
+- 拒绝顶层 status 及 metadata 中 uid、resourceVersion、managedFields、generation、creationTimestamp、deletionTimestamp、deletionGracePeriodSeconds、selfLink，字段即便为 null 也拒绝。
+- Deployment/Ingress 未指定 namespace（或为空）时填入 CLI 解析出的 namespace；非空且不一致时报 E_NAMESPACE，不发送 API 请求。Namespace 不得带非空 namespace；所有 INSERT 拒绝 --all-namespaces。
+- 本地 JSON、列、GVK、服务器字段检查在 API 请求前完成，其余资源 schema/名称合法性由 API Server 校验。INSERT 只发送一次 Create，不提前 GET，不自动 UPDATE、删除重建或重试。
+- 成功输出 `{"affected_rows":1}`；API 失败沿用 M4 汇总，含对象身份及 AlreadyExists/Invalid/Forbidden 等安全 reason，退出 1；本地语义错误输出 stderr 并退出 2。
+- manifest 查询返回完整 API 资源对象，包括服务端元数据、spec、status，而不是 JSON 字符串；SELECT * 包含 manifest。它是只读查询列，禁止 UPDATE manifest；WHERE 仅允许 IS NULL/IS NOT NULL，不支持对象比较。
+- SQL 接受的创建 manifest 不应直接使用查询返回的完整对象：先移除服务器管理字段；创建无事务保证，超时或取消后应查询确认服务端是否已创建。
+
+可复现第 5 章示例：先执行 Namespace 创建 SQL，等待其 Active，再执行 Deployment SQL；目标 YAML **只用于检查，不要 apply**。
+
+```sh
+./tmp/go-build/ksql --kubeconfig "$PWD/tmp/kube/config" --context kubesql-test \
+  < testdata/medium-insert/namespace.sql
+./tmp/tools/kubectl --kubeconfig "$PWD/tmp/kube/config" --context kubesql-test \
+  wait --for=jsonpath='{.status.phase}'=Active namespace/sql-medium-insert --timeout=120s
+./tmp/go-build/ksql --kubeconfig "$PWD/tmp/kube/config" --context kubesql-test \
+  --namespace sql-medium-insert < testdata/medium-insert/deployment.sql
+```
+
+上述手工示例会保留资源；运行自动 E2E 前应清理自己创建的示例命名空间，测试拒绝覆盖已有资源。
+
 ## 本地真实测试环境
 
 已验证组合：Docker 29.8.2、minikube 1.39.0（Docker driver）、Kubernetes/kubectl 1.35.0。
@@ -175,9 +206,11 @@ go test -tags=e2e -count=1 -v ./test/e2e
 ```
 
 默认 `go test ./...` 不运行 E2E。显式启用时若缺少上述配置会失败，不把未运行当作通过。
-E2E 仅接受明确的 `kubesql-test` context，拒绝覆盖测试所用的既有命名空间（sql-easy-select、sql-easy-where、sql-medium-write、sql-medium-delete）。
+E2E 仅接受明确的 `kubesql-test` context，拒绝覆盖测试所用的既有命名空间（sql-easy-select、sql-easy-where、sql-medium-write、sql-medium-delete、sql-medium-insert、sql-medium-insert-ingress）。
 测试通过 Go dynamic client 创建任务书夹具，调用真实 ksql 二进制，按行集合比较结果，最后删除并等待本套件命名空间消失。
 不需要手工提前 apply 夹具；部署副本数按任务书保留，但查询/过滤验收不要求镜像拉取或 Pod Ready。
 第 3 章覆盖 AND/OR 优先级、括号、IS NULL、= NULL，并补充 NOT UNKNOWN 的真实 CLI 用例。
 第 4 章分别独立准备更新/删除环境，确认镜像、selector、template、Ingress 端口等未赋值字段保持不变；另验证映射替换、版本前置检查和 finalizer 普通删除语义。
 Deployment 注解断言仅在测试中排除 controller 自动生成的 revision 键，CLI 输出仍完整；Namespace 标签断言包含 API 恢复的标准名称标签，不把服务端补键误判为 Merge Patch 残留旧用户键。
+第 5 章严格区分 preparation.yaml 与 targets.yaml，仅创建 preparation；5-1 的 preparation 为空，Namespace 由 SQL 创建并等待 Active。targets 只比较明确字段（包括 selector/template/镜像/端口），不要求服务端默认值完全一致。
+5-2 重复创建检查 AlreadyExists、退出码 1、汇总身份、唯一对象及原资源完整内容不变。额外验证 schema 拒绝、manifest 读取、缺省 namespace 与 SQL/JSON 两层转义。

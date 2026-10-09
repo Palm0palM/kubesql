@@ -69,7 +69,8 @@ func Bind(stmt *sql.Statement) (*Query, error) {
 	}
 	t.columns = append(append([]column(nil), t.columns...),
 		column{"labels", []string{"metadata", "labels"}, objectKind},
-		column{"annotations", []string{"metadata", "annotations"}, objectKind})
+		column{"annotations", []string{"metadata", "annotations"}, objectKind},
+		column{"manifest", nil, objectKind})
 	q := &Query{table: t}
 	if stmt.Where != nil {
 		where, err := bindExpression(stmt.Where, t)

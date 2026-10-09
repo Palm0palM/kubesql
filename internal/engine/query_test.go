@@ -59,6 +59,7 @@ func TestQueryScopeAndProjection(t *testing.T) {
 					"service": map[string]any{"name": "backend"},
 				}},
 			}}}}
+			tt.want["manifest"] = backend.objects[0].Object
 			rows, err := q.Execute(context.Background(), backend, "selected", tt.all)
 			if err != nil || !reflect.DeepEqual(rows, []map[string]any{tt.want}) {
 				t.Fatalf("rows = %#v, error = %v", rows, err)

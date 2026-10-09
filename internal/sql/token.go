@@ -51,6 +51,9 @@ const (
 	tokenUpdate
 	tokenSet
 	tokenDelete
+	tokenInsert
+	tokenInto
+	tokenValues
 )
 
 type token struct {

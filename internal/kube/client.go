@@ -43,6 +43,11 @@ type Client struct {
 	dynamic dynamic.Interface
 }
 
+func (c *Client) Create(ctx context.Context, gvr schema.GroupVersionResource, object unstructured.Unstructured) error {
+	_, err := c.dynamic.Resource(gvr).Namespace(object.GetNamespace()).Create(ctx, &object, metav1.CreateOptions{})
+	return err
+}
+
 // Connect uses standard kubeconfig loading/merging; it sends no API requests.
 func Connect(options Options) (*Client, string, error) {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()

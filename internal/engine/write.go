@@ -167,24 +167,28 @@ func (w *Write) Execute(ctx context.Context, client Writer, namespace string) (*
 			result.AffectedRows++
 			continue
 		}
-		reason := string(apierrors.ReasonForError(err))
-		if detail, ok := err.(*Error); ok {
-			reason = detail.Code
-		} else if errors.Is(err, context.DeadlineExceeded) {
-			reason = "Timeout"
-		} else if errors.Is(err, context.Canceled) {
-			reason = "Cancelled"
-		} else if reason == "Unknown" {
-			reason = "APIRequestFailed"
-		}
-		// API errors may contain field values: expose only the safe StatusReason.
-		result.Errors = append(result.Errors, RowError{
-			Resource: w.query.table.gvr.Resource, Namespace: object.GetNamespace(),
-			Name: object.GetName(), Reason: reason,
-		})
-		result.FailedRows++
+		result.addFailure(w.query.table.gvr, object, err)
 	}
 	return result, nil
+}
+
+// addFailure exposes safe reasons, not API messages that may contain field values.
+func (r *WriteResult) addFailure(gvr schema.GroupVersionResource, object unstructured.Unstructured, err error) {
+	reason := string(apierrors.ReasonForError(err))
+	if detail, ok := err.(*Error); ok {
+		reason = detail.Code
+	} else if errors.Is(err, context.DeadlineExceeded) {
+		reason = "Timeout"
+	} else if errors.Is(err, context.Canceled) {
+		reason = "Cancelled"
+	} else if reason == "Unknown" {
+		reason = "APIRequestFailed"
+	}
+	r.Errors = append(r.Errors, RowError{
+		Resource: gvr.Resource, Namespace: object.GetNamespace(),
+		Name: object.GetName(), Reason: reason,
+	})
+	r.FailedRows++
 }
 
 type patchOperation struct {

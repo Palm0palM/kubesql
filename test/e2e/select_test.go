@@ -60,6 +60,10 @@ func canonicalRows(t *testing.T, data []byte) []string {
 }
 
 func prepareFixture(t *testing.T, directory, fixtureNamespace string) (context.Context, string, []string) {
+	return prepareFixtureFile(t, directory, "fixture.yaml", fixtureNamespace)
+}
+
+func prepareFixtureFile(t *testing.T, directory, filename, fixtureNamespace string) (context.Context, string, []string) {
 	t.Helper()
 	path := os.Getenv("KSQL_E2E_KUBECONFIG")
 	selectedContext := os.Getenv("KSQL_E2E_CONTEXT")
@@ -84,7 +88,7 @@ func prepareFixture(t *testing.T, directory, fixtureNamespace string) (context.C
 	if _, err := namespaces.Get(ctx, fixtureNamespace, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("fixture namespace must not already exist (or API access failed): %v", err)
 	}
-	decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader(readFixture(t, directory, "fixture.yaml")), 4096)
+	decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader(readFixture(t, directory, filename)), 4096)
 	resources := map[string]schema.GroupVersionResource{
 		"Namespace":  {Version: "v1", Resource: "namespaces"},
 		"Deployment": {Group: "apps", Version: "v1", Resource: "deployments"},
@@ -107,29 +111,32 @@ func prepareFixture(t *testing.T, directory, fixtureNamespace string) (context.C
 			t.Fatal(err)
 		}
 		if object.GetKind() == "Namespace" {
-			t.Cleanup(func() {
-				cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				defer cancel()
-				if err := namespaces.Delete(cleanupCtx, fixtureNamespace, metav1.DeleteOptions{}); err != nil {
-					if !apierrors.IsNotFound(err) {
-						t.Errorf("cleanup namespace: %v", err)
-						return
-					}
-				}
-				err := wait.PollUntilContextCancel(cleanupCtx, time.Second, true, func(ctx context.Context) (bool, error) {
-					_, err := namespaces.Get(ctx, fixtureNamespace, metav1.GetOptions{})
-					if apierrors.IsNotFound(err) {
-						return true, nil
-					}
-					return false, err
-				})
-				if err != nil {
-					t.Errorf("wait for namespace cleanup: %v", err)
-				}
-			})
+			registerNamespaceCleanup(t, client, fixtureNamespace)
 		}
 	}
 	return ctx, binary, []string{"--kubeconfig", path, "--context", selectedContext, "--namespace", fixtureNamespace, "--output", "json"}
+}
+
+func registerNamespaceCleanup(t *testing.T, client dynamic.Interface, name string) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		resource := client.Resource(schema.GroupVersionResource{Version: "v1", Resource: "namespaces"})
+		if err := resource.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			t.Errorf("cleanup namespace: %v", err)
+			return
+		}
+		if err := wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
+			_, err := resource.Get(ctx, name, metav1.GetOptions{})
+			if apierrors.IsNotFound(err) {
+				return true, nil
+			}
+			return false, err
+		}); err != nil {
+			t.Errorf("wait for namespace cleanup: %v", err)
+		}
+	})
 }
 
 func TestEasySelect(t *testing.T) {
@@ -143,7 +150,34 @@ func TestEasySelect(t *testing.T) {
 			if err := cmd.Run(); err != nil || stderr.Len() != 0 {
 				t.Fatalf("CLI failed: %v, stderr: %s", err, &stderr)
 			}
-			got := canonicalRows(t, stdout.Bytes())
+			data := stdout.Bytes()
+			if name == "ingresses" {
+				// SELECT * now includes full API manifests. Verify those separately,
+				// then compare the stable convenient columns with the chapter 2 fixture.
+				var rows []map[string]any
+				decoder := json.NewDecoder(bytes.NewReader(data))
+				decoder.UseNumber()
+				if err := decoder.Decode(&rows); err != nil {
+					t.Fatal(err)
+				}
+				for _, row := range rows {
+					manifest, ok := row["manifest"].(map[string]any)
+					if !ok || manifest["kind"] != "Ingress" || manifest["apiVersion"] != "networking.k8s.io/v1" {
+						t.Fatal("SELECT * omitted full manifest")
+					}
+					metadata, ok := manifest["metadata"].(map[string]any)
+					if !ok || metadata["name"] != row["name"] || metadata["namespace"] != row["namespace"] || metadata["resourceVersion"] == nil {
+						t.Fatal("manifest metadata is incomplete")
+					}
+					delete(row, "manifest")
+				}
+				var err error
+				data, err = json.Marshal(rows)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := canonicalRows(t, data)
 			if name == "namespaces" {
 				if !slices.Contains(got, `{"name":"sql-easy-select"}`) || !slices.Contains(got, `{"name":"default"}`) {
 					t.Fatalf("Namespace table was filtered by namespace: %v", got)
