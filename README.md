@@ -8,9 +8,9 @@
 
 ## 当前状态
 
-M0、M1、M2 已完成；三表 SELECT 已实现并通过代码审查。
+M0、M1、M2、M3 已完成并通过代码审查，P0 查询闭环已具备。
 CLI 通过官方 client-go dynamic client 读取 Kubernetes，支持连接参数、命名空间选择和 JSON 输出。
-任务书 2-1、2-2 已通过真实集群 CLI E2E，夹具资源已清理。WHERE 和写操作尚未实现。
+任务书 2-1、2-2、3-1、3-2 已通过真实集群 CLI E2E，夹具资源已清理。写操作尚未实现。
 
 本地设计与计划保存在被忽略的 `docs/` 中，不提供远端不可用的文档链接。
 
@@ -19,19 +19,20 @@ CLI 通过官方 client-go dynamic client 读取 Kubernetes，支持连接参数
 ```text
 cmd/ksql/       进程入口、信号取消及入口行为测试
 internal/cli/   flags、stdin、错误/结果输出、依赖装配
-internal/sql/   token、lexer、SELECT AST、parser 及单元测试
-internal/engine/ 三表绑定、scope 与列投影
+internal/sql/   token、lexer、SELECT/表达式 AST、递归下降 parser
+internal/engine/ 三表绑定、标量类型、三值逻辑、过滤与列投影
 internal/kube/  kubeconfig、dynamic client、分页 List
 test/e2e/       显式启用的真实集群 CLI 测试
 testdata/       可复用 YAML、SQL 和预期 JSON
 go.mod/go.sum   Go 版本与固定依赖（client-go/apimachinery v0.35.9）
 ```
 
-SQL 包不依赖 Kubernetes。执行链为 `cli.Run → sql.Parse → engine.Bind → kube.Connect → Query.Execute → Client.List → JSON`。
+SQL 包不依赖 Kubernetes。执行链为 `cli.Run → sql.Parse → engine.Bind → kube.Connect → Query.Execute → Client.List → WHERE 求值 → 投影 → JSON`。
 只有查询所需的一个 `Lister` 接口；没有提前搭建通用 CRUD 框架。
 
 提交前已通过 gofmt、`go test ./...`、`go vet ./...` 和 staticcheck v0.8.1。
-Go 1.27 的 `go fix -diff`、x/tools v0.51.0 的 modernize 无修改建议；同版本 deadcode 包含测试时无报告。
+Go 更新至 1.27.2 后，staticcheck v0.8.1 原依赖无法读取新版导出格式；使用 x/tools v0.51.0 在本地临时模块中重建工具后检查通过，项目依赖未变。
+已审查并采用 Go 1.27 `go fix` 的 errors.AsType 建议，复查无剩余建议；x/tools v0.51.0 的 modernize、deadcode 无报告。
 
 ## 仓库约定
 
@@ -69,7 +70,7 @@ SELECT * FROM ingresses
 AST 保留独立星号节点，不展开字段、不检查表名或列名是否存在。
 错误为 `E_PARSE`，包含从 1 开始的行列位置。任务书 1-1 的 JSON AST 和 1-2 的第 1 行第 14 列错误均由单元测试验证。
 执行前会检查未知表、未知列和重复列，错误先于 kubeconfig 加载和 API 请求；空查询结果为 `[]`。
-当前不支持 WHERE、引号标识符或字符串，也不增加 `--parse-only` 参数。
+当前不支持双引号标识符、JOIN 或写操作，也不增加 `--parse-only` 参数。
 
 | 表 | SELECT * 公开列 |
 | --- | --- |
@@ -90,6 +91,26 @@ Ingress 无 Service 类型默认后端时输出 JSON null，不使用 rules 后�
 - `--all-namespaces` 对 Deployment/Ingress 查询全部命名空间；Namespace 表始终查询集群范围。
 - stdout 只输出查询 JSON 数组；错误 JSON 输出到 stderr。退出码：0 成功、1 配置/API/I/O 错误、2 参数/语法/语义错误。
 - 查询总超时 30 秒，Ctrl+C/SIGTERM 取消 API 请求；不等待 Pod Ready。
+
+### WHERE 过滤（M3）
+
+```sql
+SELECT name FROM deployments
+WHERE name = 'web' OR name = 'worker' AND replicas >= 3;
+
+SELECT name FROM ingresses WHERE default_backend_service IS NULL;
+```
+
+- 比较支持 `=`、`<>`、`>`、`>=`、`<`、`<=`；逻辑支持 AND、OR、NOT 和括号。
+- 优先级：比较/IS NULL > NOT > AND > OR。括号可改变结合顺序。
+- 值支持字符串、整数、小数、TRUE、FALSE、NULL 及列引用。单引号用 `''` 转义，反斜杠不作 SQL 转义。
+- 数字支持相邻正负号和十进制小数；不支持算术或科学计数法。数字比较用 `big.Rat` 保留精度，不转换成字符串或统一 float64。
+- WHERE 可以引用未投影的列；未知列及已知不兼容类型在 API 请求前报 E_UNKNOWN_COLUMN/E_TYPE，即便结果为空也不会忽略。
+- 不隐式转换 `'3'` 和数字 3。WHERE 与逻辑运算需要布尔值；字段缺失是 NULL，不是未知列。
+- NULL 比较得 UNKNOWN，NOT UNKNOWN 仍是 UNKNOWN；AND/OR 遵循三值真值表，WHERE 只保留 TRUE。`IS NULL`/`IS NOT NULL` 返回确定的布尔值。
+- `field = NULL` 不能判断空值；应使用 `field IS NULL`。
+- 先分页读取候选资源，在客户端求值后投影，不把完整 WHERE 强行转换为 fieldSelector。
+- 静态检查遍历整个表达式；运行时也检查两侧操作数，不用短路掩盖类型错误。错误不会输出资源字段值或部分结果。
 
 ## 本地真实测试环境
 
@@ -132,6 +153,7 @@ go test -tags=e2e -count=1 -v ./test/e2e
 ```
 
 默认 `go test ./...` 不运行 E2E。显式启用时若缺少上述配置会失败，不把未运行当作通过。
-E2E 仅接受明确的 `kubesql-test` context，拒绝覆盖已存在的 `sql-easy-select` 命名空间。
+E2E 仅接受明确的 `kubesql-test` context，拒绝覆盖已存在的 `sql-easy-select` 或 `sql-easy-where` 命名空间。
 测试通过 Go dynamic client 创建任务书夹具，调用真实 ksql 二进制，按行集合比较结果，最后删除并等待本套件命名空间消失。
-不需要手工提前 apply 夹具；部署副本数为 2，但本章验收不要求镜像拉取或 Pod Ready。
+不需要手工提前 apply 夹具；部署副本数按任务书保留，但查询/过滤验收不要求镜像拉取或 Pod Ready。
+第 3 章覆盖 AND/OR 优先级、括号、IS NULL、= NULL，并补充 NOT UNKNOWN 的真实 CLI 用例。
