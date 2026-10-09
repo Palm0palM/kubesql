@@ -43,6 +43,10 @@ func (p *parser) require(kind tokenKind, expected string) error {
 		found := p.token.text
 		if p.token.kind == tokenEOF {
 			found = "EOF"
+		} else if p.token.kind == tokenString {
+			found = "字符串"
+		} else if p.token.kind == tokenNumber {
+			found = "数字"
 		}
 		return &ParseError{
 			Code: "E_PARSE", Position: p.token.start,
@@ -77,6 +81,14 @@ func (p *parser) selectStatement() (*SelectStatement, error) {
 	}
 	stmt.Table = strings.ToLower(p.token.text)
 	p.advance()
+	if p.err == nil && p.token.kind == tokenWhere {
+		p.advance()
+		where, err := p.parseOr()
+		if err != nil {
+			return nil, err
+		}
+		stmt.Where = where
+	}
 	return stmt, nil
 }
 

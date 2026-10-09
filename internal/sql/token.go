@@ -30,6 +30,24 @@ const (
 	tokenStar
 	tokenComma
 	tokenSemicolon
+	tokenWhere
+	tokenAnd
+	tokenOr
+	tokenNot
+	tokenIs
+	tokenNull
+	tokenTrue
+	tokenFalse
+	tokenString
+	tokenNumber
+	tokenLeftParen
+	tokenRightParen
+	tokenEqual
+	tokenNotEqual
+	tokenGreater
+	tokenGreaterEqual
+	tokenLess
+	tokenLessEqual
 )
 
 type token struct {
