@@ -1,1 +1,1 @@
-[{"name":"web","namespace":"sql-easy-select","default_backend_service":"web"}]
+[{"name":"web","namespace":"sql-easy-select","default_backend_service":"web","labels":null,"annotations":null}]

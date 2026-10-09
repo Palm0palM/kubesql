@@ -48,7 +48,7 @@ func TestCLIRoutingAndJSON(t *testing.T) {
 		{"SELECT name FROM deployments;", "/apis/apps/v1/namespaces/chosen/deployments", "", `[]`, []string{"--namespace", "chosen"}},
 		{"SELECT name FROM deployments;", "/apis/apps/v1/deployments", "", `[]`, []string{"--all-namespaces"}},
 		{"SELECT name FROM namespaces;", "/api/v1/namespaces", `{"metadata":{"name":"default"}}`, `[{"name":"default"}]`, []string{"--namespace", "unrelated"}},
-		{"SELECT * FROM ingresses;", "/apis/networking.k8s.io/v1/namespaces/context-ns/ingresses", `{"metadata":{"name":"internal","namespace":"context-ns"},"spec":{"rules":[]}}`, `[{"name":"internal","namespace":"context-ns","default_backend_service":null}]`, nil},
+		{"SELECT * FROM ingresses;", "/apis/networking.k8s.io/v1/namespaces/context-ns/ingresses", `{"metadata":{"name":"internal","namespace":"context-ns"},"spec":{"rules":[]}}`, `[{"name":"internal","namespace":"context-ns","default_backend_service":null,"labels":null,"annotations":null}]`, nil},
 	} {
 		t.Run(tt.query+tt.path, func(t *testing.T) {
 			calls := 0

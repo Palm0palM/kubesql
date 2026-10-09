@@ -57,7 +57,13 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	if err != nil {
 		return fail(stderr, 2, err)
 	}
-	query, err := engine.Bind(stmt)
+	var query *engine.Query
+	var write *engine.Write
+	if stmt.Type == "select" {
+		query, err = engine.Bind(stmt)
+	} else {
+		write, err = engine.BindWrite(stmt, *all)
+	}
 	if err != nil {
 		return fail(stderr, 2, err)
 	}
@@ -67,15 +73,26 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	rows, err := query.Execute(ctx, client, namespace, *all)
+	var outputValue any
+	exitCode := 0
+	if write != nil {
+		var result *engine.WriteResult
+		result, err = write.Execute(ctx, client, namespace)
+		outputValue = result
+		if result != nil && result.FailedRows != 0 {
+			exitCode = 1
+		}
+	} else {
+		outputValue, err = query.Execute(ctx, client, namespace, *all)
+	}
 	if err != nil {
 		if semantic, ok := errors.AsType[*engine.Error](err); ok {
 			return fail(stderr, 2, semantic)
 		}
 		return fail(stderr, 1, diagnostic{Code: "E_API", Message: err.Error(), Reason: string(apierrors.ReasonForError(err))})
 	}
-	if err := json.NewEncoder(stdout).Encode(rows); err != nil {
+	if err := json.NewEncoder(stdout).Encode(outputValue); err != nil {
 		return fail(stderr, 1, diagnostic{Code: "E_OUTPUT", Message: "cannot write JSON results"})
 	}
-	return 0
+	return exitCode
 }

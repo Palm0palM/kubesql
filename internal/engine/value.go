@@ -13,6 +13,7 @@ const (
 	stringKind
 	numberKind
 	boolKind
+	objectKind
 )
 
 type truth uint8

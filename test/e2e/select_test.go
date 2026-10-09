@@ -111,8 +111,10 @@ func prepareFixture(t *testing.T, directory, fixtureNamespace string) (context.C
 				cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 				defer cancel()
 				if err := namespaces.Delete(cleanupCtx, fixtureNamespace, metav1.DeleteOptions{}); err != nil {
-					t.Errorf("cleanup namespace: %v", err)
-					return
+					if !apierrors.IsNotFound(err) {
+						t.Errorf("cleanup namespace: %v", err)
+						return
+					}
 				}
 				err := wait.PollUntilContextCancel(cleanupCtx, time.Second, true, func(ctx context.Context) (bool, error) {
 					_, err := namespaces.Get(ctx, fixtureNamespace, metav1.GetOptions{})

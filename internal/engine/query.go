@@ -62,11 +62,14 @@ type Query struct {
 }
 
 // Bind validates every column, including for an empty result, without API calls.
-func Bind(stmt *sql.SelectStatement) (*Query, error) {
+func Bind(stmt *sql.Statement) (*Query, error) {
 	t, ok := tables[stmt.Table]
 	if !ok {
 		return nil, &Error{Code: "E_UNKNOWN_TABLE", Message: fmt.Sprintf("unknown table %q", stmt.Table)}
 	}
+	t.columns = append(append([]column(nil), t.columns...),
+		column{"labels", []string{"metadata", "labels"}, objectKind},
+		column{"annotations", []string{"metadata", "annotations"}, objectKind})
 	q := &Query{table: t}
 	if stmt.Where != nil {
 		where, err := bindExpression(stmt.Where, t)
@@ -109,6 +112,27 @@ type Lister interface {
 }
 
 func (q *Query) Execute(ctx context.Context, client Lister, namespace string, allNamespaces bool) ([]map[string]any, error) {
+	objects, err := q.candidates(ctx, client, namespace, allNamespaces)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]map[string]any, 0, len(objects))
+	for _, object := range objects {
+		row := make(map[string]any, len(q.columns))
+		for _, c := range q.columns {
+			value, err := readColumn(object, c)
+			if err != nil {
+				return nil, err
+			}
+			row[c.name] = value
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+// candidates evaluates the entire WHERE before a caller starts any writes.
+func (q *Query) candidates(ctx context.Context, client Lister, namespace string, allNamespaces bool) ([]unstructured.Unstructured, error) {
 	scope := ""
 	if q.table.namespaced && !allNamespaces {
 		scope = namespace
@@ -117,7 +141,7 @@ func (q *Query) Execute(ctx context.Context, client Lister, namespace string, al
 	if err != nil {
 		return nil, err
 	}
-	rows := make([]map[string]any, 0, len(objects))
+	matchedObjects := make([]unstructured.Unstructured, 0, len(objects))
 	for _, object := range objects {
 		if q.where != nil {
 			result, err := q.where.evaluate(object)
@@ -132,15 +156,7 @@ func (q *Query) Execute(ctx context.Context, client Lister, namespace string, al
 				continue
 			}
 		}
-		row := make(map[string]any, len(q.columns))
-		for _, c := range q.columns {
-			value, err := readColumn(object, c)
-			if err != nil {
-				return nil, err
-			}
-			row[c.name] = value
-		}
-		rows = append(rows, row)
+		matchedObjects = append(matchedObjects, object)
 	}
-	return rows, nil
+	return matchedObjects, nil
 }

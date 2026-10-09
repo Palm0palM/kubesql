@@ -48,6 +48,9 @@ const (
 	tokenGreaterEqual
 	tokenLess
 	tokenLessEqual
+	tokenUpdate
+	tokenSet
+	tokenDelete
 )
 
 type token struct {

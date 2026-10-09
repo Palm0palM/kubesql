@@ -54,6 +54,8 @@ func bindExpression(expr sql.Expression, t table) (*boundExpression, error) {
 			if !booleanKind(left.kind) || !booleanKind(right.kind) {
 				return nil, typeError("AND/OR require boolean values")
 			}
+		} else if left.kind == objectKind || right.kind == objectKind {
+			return nil, typeError("WHERE comparisons require scalar values")
 		} else if left.kind != nullKind && right.kind != nullKind && left.kind != right.kind {
 			return nil, typeError("comparison operands have incompatible types")
 		}
@@ -83,6 +85,15 @@ func (e *boundExpression) evaluate(object unstructured.Unstructured) (value, err
 			return value{}, err
 		}
 		v, err := scalarValue(raw)
+		if e.kind == objectKind {
+			if raw == nil {
+				return value{kind: nullKind}, nil
+			}
+			if _, ok := raw.(map[string]any); !ok {
+				return value{}, typeError("unexpected value type for column " + e.field.name)
+			}
+			return value{kind: objectKind, scalar: raw}, nil
+		}
 		if err == nil && v.kind != nullKind && v.kind != e.kind {
 			err = typeError("unexpected value type for column " + e.field.name)
 		}

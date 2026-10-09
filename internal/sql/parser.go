@@ -11,12 +11,19 @@ type parser struct {
 	err   error
 }
 
-// Parse accepts one SELECT statement, an optional semicolon, and then EOF.
+// Parse accepts one SELECT, UPDATE or DELETE, an optional semicolon, then EOF.
 // It performs no Kubernetes requests or table/column validation.
-func Parse(input string) (*SelectStatement, error) {
+func Parse(input string) (*Statement, error) {
 	p := &parser{lexer: newLexer(input)}
 	p.advance()
-	stmt, err := p.selectStatement()
+	var stmt *Statement
+	var err error
+	switch p.token.kind {
+	case tokenUpdate, tokenDelete:
+		stmt, err = p.writeStatement()
+	default:
+		stmt, err = p.selectStatement()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -56,12 +63,12 @@ func (p *parser) require(kind tokenKind, expected string) error {
 	return nil
 }
 
-func (p *parser) selectStatement() (*SelectStatement, error) {
+func (p *parser) selectStatement() (*Statement, error) {
 	if err := p.require(tokenSelect, "SELECT"); err != nil {
 		return nil, err
 	}
 	p.advance()
-	stmt := &SelectStatement{Type: "select"}
+	stmt := &Statement{Type: "select"}
 	if p.token.kind == tokenStar && p.err == nil {
 		stmt.Columns = []Column{{Type: "star", Position: p.token.start}}
 		p.advance()
@@ -81,15 +88,22 @@ func (p *parser) selectStatement() (*SelectStatement, error) {
 	}
 	stmt.Table = strings.ToLower(p.token.text)
 	p.advance()
+	if err := p.optionalWhere(stmt); err != nil {
+		return nil, err
+	}
+	return stmt, nil
+}
+
+func (p *parser) optionalWhere(stmt *Statement) error {
 	if p.err == nil && p.token.kind == tokenWhere {
 		p.advance()
 		where, err := p.parseOr()
 		if err != nil {
-			return nil, err
+			return err
 		}
 		stmt.Where = where
 	}
-	return stmt, nil
+	return p.err
 }
 
 func (p *parser) columnList() ([]Column, error) {

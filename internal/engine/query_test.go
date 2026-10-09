@@ -52,6 +52,7 @@ func TestQueryScopeAndProjection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.table+tt.scope, func(t *testing.T) {
 			q := bindQuery(t, "SELECT * FROM "+tt.table)
+			tt.want["labels"], tt.want["annotations"] = nil, nil
 			backend := &stubLister{objects: []unstructured.Unstructured{{Object: map[string]any{
 				"metadata": map[string]any{"name": "web", "namespace": "selected"},
 				"spec": map[string]any{"replicas": int64(2), "defaultBackend": map[string]any{

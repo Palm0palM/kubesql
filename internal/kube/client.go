@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -16,6 +17,26 @@ type Options struct {
 	Kubeconfig string
 	Context    string
 	Namespace  string
+}
+
+func (c *Client) Patch(ctx context.Context, gvr schema.GroupVersionResource, object unstructured.Unstructured, patch []byte) error {
+	_, err := c.dynamic.Resource(gvr).Namespace(object.GetNamespace()).Patch(ctx, object.GetName(), types.JSONPatchType, patch, metav1.PatchOptions{})
+	return err
+}
+
+func (c *Client) Delete(ctx context.Context, gvr schema.GroupVersionResource, object unstructured.Unstructured) error {
+	options := metav1.DeleteOptions{}
+	preconditions := &metav1.Preconditions{}
+	if uid := object.GetUID(); uid != "" {
+		preconditions.UID = &uid
+	}
+	if version := object.GetResourceVersion(); version != "" {
+		preconditions.ResourceVersion = &version
+	}
+	if preconditions.UID != nil || preconditions.ResourceVersion != nil {
+		options.Preconditions = preconditions
+	}
+	return c.dynamic.Resource(gvr).Namespace(object.GetNamespace()).Delete(ctx, object.GetName(), options)
 }
 
 type Client struct {
