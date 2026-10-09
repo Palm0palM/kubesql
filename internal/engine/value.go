@@ -14,6 +14,7 @@ const (
 	numberKind
 	boolKind
 	objectKind
+	dynamicKind
 )
 
 type truth uint8

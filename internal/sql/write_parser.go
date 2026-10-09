@@ -1,7 +1,5 @@
 package sql
 
-import "strings"
-
 func (p *parser) writeStatement() (*Statement, error) {
 	stmt := &Statement{Type: "update"}
 	if p.token.kind == tokenDelete {
@@ -14,22 +12,23 @@ func (p *parser) writeStatement() (*Statement, error) {
 		}
 		p.advance()
 	}
-	if err := p.require(tokenIdentifier, "表名"); err != nil {
+	name, quoted, err := p.identifier("表名")
+	if err != nil {
 		return nil, err
 	}
-	stmt.Table = strings.ToLower(p.token.text)
-	p.advance()
+	stmt.Table, stmt.TableQuoted = name, quoted
 	if stmt.Type == "update" {
 		if err := p.require(tokenSet, "SET"); err != nil {
 			return nil, err
 		}
 		p.advance()
 		for {
-			if err := p.require(tokenIdentifier, "赋值列名"); err != nil {
+			position := p.token.start
+			name, quoted, err := p.identifier("赋值列名")
+			if err != nil {
 				return nil, err
 			}
-			assignment := Assignment{Column: strings.ToLower(p.token.text), Position: p.token.start}
-			p.advance()
+			assignment := Assignment{Column: name, Quoted: quoted, Position: position}
 			if err := p.require(tokenEqual, "="); err != nil {
 				return nil, err
 			}

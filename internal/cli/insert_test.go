@@ -48,6 +48,9 @@ func TestInsertCLIProtocolAndResults(t *testing.T) {
 		t.Run(tt.table+tt.reason, func(t *testing.T) {
 			calls := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if serveDiscovery(w, r) {
+					return
+				}
 				calls++
 				if r.Method != http.MethodPost || r.URL.Path != tt.path {
 					t.Errorf("request=%s %s", r.Method, r.URL.Path)

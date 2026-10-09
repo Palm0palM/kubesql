@@ -3,7 +3,9 @@ package engine
 import (
 	"context"
 	"fmt"
+	"slices"
 
+	"github.com/Palm0palM/kubesql/internal/resource"
 	"github.com/Palm0palM/kubesql/internal/sql"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -18,38 +20,45 @@ type Error struct {
 func (e *Error) Error() string { return e.Message }
 
 type column struct {
-	name string
-	path []string
-	kind valueKind
+	name    string
+	path    []string
+	kind    valueKind
+	output  string
+	pointer bool
 }
 
 type table struct {
 	gvr        schema.GroupVersionResource
 	namespaced bool
 	columns    []column
+	kind       string
+	verbs      []string
 }
 
 var tables = map[string]table{
 	"namespaces": {
-		gvr:     schema.GroupVersionResource{Version: "v1", Resource: "namespaces"},
-		columns: []column{{"name", []string{"metadata", "name"}, stringKind}},
+		gvr: schema.GroupVersionResource{Version: "v1", Resource: "namespaces"},
+		columns: []column{
+			{name: "name", path: []string{"metadata", "name"}, kind: stringKind},
+			{name: "namespace", kind: stringKind},
+		},
 	},
 	"deployments": {
 		gvr:        schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
 		namespaced: true,
 		columns: []column{
-			{"name", []string{"metadata", "name"}, stringKind},
-			{"namespace", []string{"metadata", "namespace"}, stringKind},
-			{"replicas", []string{"spec", "replicas"}, numberKind},
+			{name: "name", path: []string{"metadata", "name"}, kind: stringKind},
+			{name: "namespace", path: []string{"metadata", "namespace"}, kind: stringKind},
+			{name: "replicas", path: []string{"spec", "replicas"}, kind: numberKind},
 		},
 	},
 	"ingresses": {
 		gvr:        schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "ingresses"},
 		namespaced: true,
 		columns: []column{
-			{"name", []string{"metadata", "name"}, stringKind},
-			{"namespace", []string{"metadata", "namespace"}, stringKind},
-			{"default_backend_service", []string{"spec", "defaultBackend", "service", "name"}, stringKind},
+			{name: "name", path: []string{"metadata", "name"}, kind: stringKind},
+			{name: "namespace", path: []string{"metadata", "namespace"}, kind: stringKind},
+			{name: "default_backend_service", path: []string{"spec", "defaultBackend", "service", "name"}, kind: stringKind},
 		},
 	},
 }
@@ -62,15 +71,64 @@ type Query struct {
 }
 
 // Bind validates every column, including for an empty result, without API calls.
-func Bind(stmt *sql.Statement) (*Query, error) {
+func Bind(stmt *sql.Statement, resolved ...resource.Descriptor) (*Query, error) {
+	t, err := bindTable(stmt, resolved)
+	if err != nil {
+		return nil, err
+	}
+	return bindQueryTable(stmt, t)
+}
+
+func bindTable(stmt *sql.Statement, resolved []resource.Descriptor) (table, error) {
 	t, ok := tables[stmt.Table]
-	if !ok {
-		return nil, &Error{Code: "E_UNKNOWN_TABLE", Message: fmt.Sprintf("unknown table %q", stmt.Table)}
+	if len(resolved) != 0 {
+		d := resolved[0]
+		t = table{gvr: d.GVR, namespaced: d.Namespaced, kind: d.Kind, verbs: d.Verbs}
+		for _, known := range tables {
+			if known.gvr == d.GVR {
+				t.columns = known.columns
+			}
+		}
+		if t.columns == nil {
+			t.columns = []column{{name: "name", path: []string{"metadata", "name"}, kind: stringKind}}
+		}
+		if !slices.ContainsFunc(t.columns, func(c column) bool { return c.name == "namespace" }) {
+			path := []string{"metadata", "namespace"}
+			if !d.Namespaced {
+				path = nil
+			}
+			t.columns = append(append([]column(nil), t.columns...), column{name: "namespace", path: path, kind: stringKind})
+		}
+	} else if !ok {
+		return table{}, &Error{Code: "E_UNKNOWN_TABLE", Message: fmt.Sprintf("unknown table %q", stmt.Table)}
 	}
 	t.columns = append(append([]column(nil), t.columns...),
-		column{"labels", []string{"metadata", "labels"}, objectKind},
-		column{"annotations", []string{"metadata", "annotations"}, objectKind},
-		column{"manifest", nil, objectKind})
+		column{name: "labels", path: []string{"metadata", "labels"}, kind: objectKind},
+		column{name: "annotations", path: []string{"metadata", "annotations"}, kind: objectKind},
+		column{name: "manifest", kind: objectKind})
+	return t, nil
+}
+
+func requireVerbs(t table, verbs ...string) error {
+	// nil is reserved for offline static bindings/preflight. Discovery supplies a
+	// non-nil list, including an empty list when no verbs are advertised.
+	if t.verbs == nil {
+		return nil
+	}
+	for _, verb := range verbs {
+		if !slices.Contains(t.verbs, verb) {
+			return &Error{Code: "E_UNSUPPORTED_VERB", Message: "resource does not advertise required verb " + verb}
+		}
+	}
+	return nil
+}
+
+func bindQueryTable(stmt *sql.Statement, t table) (*Query, error) {
+	if stmt.Type == "select" {
+		if err := requireVerbs(t, "list"); err != nil {
+			return nil, err
+		}
+	}
 	q := &Query{table: t}
 	if stmt.Where != nil {
 		where, err := bindExpression(stmt.Where, t)
@@ -88,21 +146,20 @@ func Bind(stmt *sql.Statement) (*Query, error) {
 	}
 	seen := make(map[string]bool)
 	for _, selected := range stmt.Columns {
-		if seen[selected.Name] {
+		output := selected.Name
+		if selected.Alias != "" {
+			output = selected.Alias
+		}
+		if seen[output] {
 			return nil, &Error{Code: "E_DUPLICATE_COLUMN", Message: fmt.Sprintf("duplicate column %q", selected.Name)}
 		}
-		seen[selected.Name] = true
-		found := false
-		for _, c := range t.columns {
-			if c.name == selected.Name {
-				q.columns = append(q.columns, c)
-				found = true
-				break
-			}
+		seen[output] = true
+		c, err := resolveColumn(selected.Name, selected.Quoted, t)
+		if err != nil {
+			return nil, err
 		}
-		if !found {
-			return nil, &Error{Code: "E_UNKNOWN_COLUMN", Message: fmt.Sprintf("unknown column %q for table %q", selected.Name, stmt.Table)}
-		}
+		c.output = output
+		q.columns = append(q.columns, c)
 	}
 	return q, nil
 }
@@ -125,7 +182,11 @@ func (q *Query) Execute(ctx context.Context, client Lister, namespace string, al
 			if err != nil {
 				return nil, err
 			}
-			row[c.name] = value
+			key := c.output
+			if key == "" {
+				key = c.name
+			}
+			row[key] = value
 		}
 		rows = append(rows, row)
 	}

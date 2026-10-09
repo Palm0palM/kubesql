@@ -39,6 +39,9 @@ func TestWriteCLIContinuesAfterAPIFailure(t *testing.T) {
 		t.Run(operation.method, func(t *testing.T) {
 			writes := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if serveDiscovery(w, r) {
+					return
+				}
 				w.Header().Set("Content-Type", "application/json")
 				if r.Method == http.MethodGet {
 					fmt.Fprint(w, `{"apiVersion":"apps/v1","kind":"DeploymentList","items":[{"metadata":{"name":"bad","namespace":"context-ns","resourceVersion":"12"},"spec":{"replicas":0}},{"metadata":{"name":"good","namespace":"context-ns","resourceVersion":"13"},"spec":{"replicas":0}}]}`)

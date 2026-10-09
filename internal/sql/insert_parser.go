@@ -1,23 +1,21 @@
 package sql
 
-import "strings"
-
 func (p *parser) insertStatement() (*Statement, error) {
 	p.advance() // INSERT
 	if err := p.require(tokenInto, "INTO"); err != nil {
 		return nil, err
 	}
 	p.advance()
-	if err := p.require(tokenIdentifier, "表名"); err != nil {
+	name, quoted, err := p.identifier("表名")
+	if err != nil {
 		return nil, err
 	}
-	stmt := &Statement{Type: "insert", Table: strings.ToLower(p.token.text)}
-	p.advance()
+	stmt := &Statement{Type: "insert", Table: name, TableQuoted: quoted}
 	if err := p.require(tokenLeftParen, "("); err != nil {
 		return nil, err
 	}
 	p.advance()
-	columns, err := p.columnList()
+	columns, err := p.columnList(false)
 	if err != nil {
 		return nil, err
 	}

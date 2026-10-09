@@ -44,7 +44,7 @@ func TestPatchAndDeleteProtocol(t *testing.T) {
 		fmt.Fprint(w, `{"kind":"Deployment","apiVersion":"apps/v1","metadata":{"name":"web","namespace":"chosen"}}`)
 	}))
 	defer server.Close()
-	client, _, err := Connect(Options{Kubeconfig: writeConfig(t, server.URL)})
+	client, _, err := Connect(context.Background(), Options{Kubeconfig: writeConfig(t, server.URL)})
 	if err != nil {
 		t.Fatal(err)
 	}

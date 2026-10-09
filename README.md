@@ -8,9 +8,9 @@
 
 ## 当前状态
 
-M0–M4 已完成并提交；M5 INSERT/manifest 已实现，等待代码审查。
+M0–M5 已完成并提交；M6 Discovery/通用 CRUD 已实现，等待代码审查。
 CLI 通过官方 client-go dynamic client 查询和操作 Kubernetes，支持连接参数、命名空间选择和 JSON 输出。
-任务书第 2–5 章已通过真实集群 CLI E2E，夹具资源已清理；第 1 章通过离线语法测试。
+任务书第 2–6 章已通过真实集群 CLI E2E，夹具资源已清理；第 1 章通过离线语法测试。
 
 本地设计与计划保存在被忽略的 `docs/` 中，不提供远端不可用的文档链接。
 
@@ -21,16 +21,17 @@ cmd/ksql/       进程入口、信号取消及入口行为测试
 internal/cli/   flags、stdin、错误/结果输出、依赖装配
 internal/sql/   token、lexer、Statement/表达式 AST、递归下降 parser
 internal/engine/ 三表绑定、三值逻辑、过滤/投影、精确 patch 与写入汇总
-internal/kube/  kubeconfig、dynamic client、分页 List/Patch/Delete/Create
+internal/resource/ 共享 Discovery 描述（GVR/Kind/scope/verbs）与发现错误
+internal/kube/  kubeconfig、Discovery 快照、dynamic List/Patch/Delete/Create
 test/e2e/       显式启用的真实集群 CLI 测试
 testdata/       可复用 YAML、SQL 和预期 JSON
 go.mod/go.sum   Go 版本与固定依赖（client-go/apimachinery v0.35.9）
 ```
 
-SQL 包不依赖 Kubernetes。执行链为 `cli.Run → sql.Parse → engine.Bind → kube.Connect → Query.Execute → Client.List → WHERE 求值 → 投影 → JSON`。
+SQL 包不依赖 Kubernetes。执行链为 `cli.Run → sql.Parse → engine.Preflight → kube.Connect → Client.Resolve → engine.Bind → Query.Execute → Client.List → WHERE 求值 → 投影 → JSON`。
 读操作使用 `Lister`，条件写操作使用 `Writer`，创建使用只含 Create 的 `Creator`；没有提前搭建通用 CRUD 框架。
 `Statement.Type` 区分 select/update/delete/insert；SELECT/INSERT 使用 Columns，UPDATE 使用 Assignments，INSERT 的 Values 表示一个元组。WHERE 仅用于查询和条件写入。
-创建链为 `cli.Run → sql.Parse → engine.BindInsert → kube.Connect → Insert.Execute → Client.Create → WriteResult → JSON`。
+创建同样先 Preflight/Connect/Resolve，再 `BindInsert → Insert.Execute → Client.Create → WriteResult → JSON`。Connect 的 context 也约束无 context 参数的官方 Discovery 方法。
 
 提交前已通过 gofmt、`go test ./...`、`go vet ./...` 和 staticcheck v0.8.1。
 Go 更新至 1.27.2 后，staticcheck v0.8.1 原依赖无法读取新版导出格式；使用 x/tools v0.51.0 在本地临时模块中重建工具后检查通过，项目依赖未变。
@@ -71,17 +72,17 @@ SELECT * FROM ingresses
 关键字忽略大小写，未引用的表名/列名归一化为小写；分号可省略，后面必须是 EOF。
 AST 保留独立星号节点，不展开字段、不检查表名或列名是否存在。
 错误为 `E_PARSE`，包含从 1 开始的行列位置。任务书 1-1 的 JSON AST 和 1-2 的第 1 行第 14 列错误均由单元测试验证。
-执行前会检查未知表、未知列和重复列，错误先于 kubeconfig 加载和 API 请求；空查询结果为 `[]`。
-当前不支持双引号标识符、JOIN、Discovery 通用资源、Metrics 或 CRD，也不增加 `--parse-only` 参数。
+未知列、重复输出键、已知类型及写保护等错误先于 Discovery；未知表必须由实际 Discovery 判断，因此可产生 Discovery 请求，但不发送资源 List/写入请求。空查询结果为 `[]`。
+当前不支持 JOIN、Metrics 虚拟表、批量 INSERT、create-only Review 特殊规则，也不增加 `--parse-only` 参数。CRD 注册/版本变更/聚合 API 特殊能力未做第 8 章验收，不声称已完成 M8。
 
 | 表 | SELECT * 公开列 |
 | --- | --- |
-| namespaces | name、labels、annotations、manifest |
+| namespaces | name、namespace（NULL）、labels、annotations、manifest |
 | deployments | name、namespace、replicas、labels、annotations、manifest |
 | ingresses | name、namespace、default_backend_service、labels、annotations、manifest |
 
 Ingress 无 Service 类型默认后端时输出 JSON null，不使用 rules 后端填充；数字保留数字类型。
-只支持这些复数表名，不支持 deploy/ns 等缩写。
+所有发现到的普通资源有 name、namespace、labels、annotations、manifest；原三表保留便捷列。不支持 deploy/ns 等缩写。
 
 ```sh
 ./tmp/go-build/ksql --kubeconfig "$PWD/tmp/kube/config" --context kubesql-test \
@@ -125,7 +126,7 @@ DELETE FROM deployments WHERE name = 'web';
 
 - UPDATE 支持逗号分隔多个 SET，值限字面量；WHERE 与 SELECT 完全复用解析、列绑定及三值逻辑。
 - UPDATE/DELETE 缺 WHERE 返回 `E_WHERE_REQUIRED`。写入拒绝 `--all-namespaces`，namespaced 资源只操作解析出的一个命名空间；Namespace 写入不受 namespace 过滤。
-- 三表均可替换 labels/annotations，输入为含 JSON 对象的 SQL 字符串且所有值必须为字符串。空对象清空映射；本阶段不接受 SQL NULL 赋值。
+- 所有表均可替换 labels/annotations，输入为含 JSON 对象的 SQL 字符串且所有值必须为字符串。空对象清空映射；M6 起这些可选映射接受 SQL NULL，表示移除字段。
 - Deployment 额外可写 replicas：0–2147483647 的整数。Ingress 额外可写 default_backend_service：合法非空 Service 名称，必须已有 Service 类型默认后端，仅改名称并保留端口。
 - 禁止写 name、namespace、status、服务器管理字段及所有未公开的可写列；重复 SET 拒绝。赋值类型和 WHERE 检查在 API 写入前完成。
 - 先读取并筛选完整候选集合，再逐对象写入；WHERE 求值错误时没有对象被写入。0 匹配成功输出 `{"affected_rows":0}`。
@@ -143,14 +144,40 @@ VALUES ('{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"example"}}');
 SELECT manifest FROM namespaces WHERE name = 'example';
 ```
 
-- 三表均支持单个 VALUES 元组，仅允许 manifest 列和一个 SQL 字符串值。SQL lexer 先解码 `''`，独立 JSON 解码器再处理 JSON 转义；不支持批量创建。
-- manifest 必须是一个完整 JSON 对象；apiVersion/kind 必须分别匹配 v1/Namespace、apps/v1/Deployment、networking.k8s.io/v1/Ingress，metadata.name 必须为非空字符串。本阶段不支持 generateName。
+- 支持单个 VALUES 元组，仅允许 manifest 列和一个 SQL 字符串值。SQL lexer 先解码 `''`，独立 JSON 解码器再处理 JSON 转义；不支持批量创建。
+- manifest 必须是一个完整 JSON 对象；apiVersion/kind 必须匹配 Discovery 实际选中的 GVR/Kind，metadata.name 必须为非空字符串。本阶段不支持 generateName，也不放宽 create-only 请求对象的名称规则。
 - 拒绝顶层 status 及 metadata 中 uid、resourceVersion、managedFields、generation、creationTimestamp、deletionTimestamp、deletionGracePeriodSeconds、selfLink，字段即便为 null 也拒绝。
 - Deployment/Ingress 未指定 namespace（或为空）时填入 CLI 解析出的 namespace；非空且不一致时报 E_NAMESPACE，不发送 API 请求。Namespace 不得带非空 namespace；所有 INSERT 拒绝 --all-namespaces。
-- 本地 JSON、列、GVK、服务器字段检查在 API 请求前完成，其余资源 schema/名称合法性由 API Server 校验。INSERT 只发送一次 Create，不提前 GET，不自动 UPDATE、删除重建或重试。
+- 本地 JSON、列、服务器字段检查先于 Discovery，GVK/scope/verbs 在获取描述后、Create 前检查；其余资源 schema/名称合法性由 API Server 校验。INSERT 只发送一次 Create，不提前 GET，不自动 UPDATE、删除重建或重试。
 - 成功输出 `{"affected_rows":1}`；API 失败沿用 M4 汇总，含对象身份及 AlreadyExists/Invalid/Forbidden 等安全 reason，退出 1；本地语义错误输出 stderr 并退出 2。
 - manifest 查询返回完整 API 资源对象，包括服务端元数据、spec、status，而不是 JSON 字符串；SELECT * 包含 manifest。它是只读查询列，禁止 UPDATE manifest；WHERE 仅允许 IS NULL/IS NOT NULL，不支持对象比较。
 - SQL 接受的创建 manifest 不应直接使用查询返回的完整对象：先移除服务器管理字段；创建无事务保证，超时或取消后应查询确认服务端是否已创建。
+
+### Discovery、Pointer 与通用 CRUD（M6）
+
+```sql
+SELECT name, "/spec/replicas" AS replicas FROM "apps/v1/statefulsets";
+SELECT name, "/data/username" AS username FROM secrets;
+UPDATE configmaps SET "/data/mode" = 'prod' WHERE name = 'settings';
+UPDATE configmaps SET "/data" = CAST('{"mode":"prod","region":"test"}' AS JSON)
+WHERE name = 'settings';
+UPDATE configmaps SET "/data/region" = NULL WHERE name = 'settings';
+```
+
+- 每条语句独立 Discovery，不做磁盘/跨进程缓存。普通复数表名按实际 APIResource.Name 查找，不猜复数、不使用 shortNames；先按 group 判断歧义，再选择提供该资源的 preferred version，缺资源时按该组 Discovery 版本顺序回退。
+- 精确表名必须双引号包裹：核心组 `"v1/configmaps"`，其他组 `"apps/v1/statefulsets"`；只发现并使用该版本，绝不回退。子资源（status/scale/exec 等）不作为普通表。
+- 部分 group/version 发现失败时，简单名返回 E_DISCOVERY，不能假定没有组间歧义；精确健康版本仍可用。跨组同名返回 E_AMBIGUOUS_TABLE；实际资源缺失返回 E_UNKNOWN_TABLE。
+- SELECT 需 list，UPDATE 需 list+patch，DELETE 需 list+delete，INSERT 需 create；缺能力返回 E_UNSUPPORTED_VERB，检查后才调用资源 API。verbs 是 API 能力，不等于用户 RBAC 权限；Forbidden 仍由 API 返回。
+- Discovery scope 决定路由。集群级对象 namespace 输出 NULL，并忽略 CLI namespace；所有 namespaced 写入仍限一个 namespace，拒绝 --all-namespaces。
+- 双引号标识符保留大小写，用 `""` 转义双引号；Pointer 从 `/` 开始，严格解码 `~0`、`~1`。空 Pointer 可读取根对象，但不可更新。AS 只改变输出键；禁止重复输出键，不允许在 WHERE 用投影别名代替源列。
+- Pointer 读取缺失路径输出 NULL；对象/数组保持 JSON 类型，数组索引为非负十进制整数，不接受前导零和 `-`。动态字段的 WHERE 类型在运行时检查，只比较标量；整个候选集合求值完成后才开始写入。
+- 写入只在已有父对象下添加叶子，不自动创建中间节点。数组只支持已有索引的替换，不支持插入/删除；重复路径及祖先/后代重叠赋值在 Discovery 前拒绝。
+- Pointer 普通字符串始终是字符串，不猜 JSON。受限 CAST(string AS JSON) 仅用于 SET，允许对象、数组、布尔、数字、字符串或 JSON null；不是通用 SQL 函数系统。
+- SQL NULL 删除可选映射字段，叶子已缺失时不重复 remove；CAST('null' AS JSON) 发送 value:null，是否保存由服务端 schema 决定。非空对象/数组整体 replace，不能残留旧键。
+- 按解码后的 Pointer 段检查写保护：根、apiVersion、kind、status、metadata.name/namespace 和服务器管理字段及其祖先/后代均禁止更新；不能整体替换 /metadata 绕过。labels/annotations 仍允许整体替换。
+- SQL/JSON 整数以 int64 写入，超过 int64 范围拒绝；大于 2^53 的整数（含数学上为整数的 JSON 小数/指数写法）保持精确。非整数 JSON 数字遵循 Kubernetes 的 float64 表示，不承诺任意小数写入精度。
+- Secret data 保持 API 的 Base64，不自动解码；整语句 API 错误和逐对象失败都不回显原资源、manifest、patch 或 API 详细字段值。
+- 资源不可变字段、键格式和其他 schema 约束交给 API Server 拒绝，不自动重建。程序不会等待 PVC 绑定或业务 Pod Ready。
 
 可复现第 5 章示例：先执行 Namespace 创建 SQL，等待其 Active，再执行 Deployment SQL；目标 YAML **只用于检查，不要 apply**。
 
@@ -206,7 +233,7 @@ go test -tags=e2e -count=1 -v ./test/e2e
 ```
 
 默认 `go test ./...` 不运行 E2E。显式启用时若缺少上述配置会失败，不把未运行当作通过。
-E2E 仅接受明确的 `kubesql-test` context，拒绝覆盖测试所用的既有命名空间（sql-easy-select、sql-easy-where、sql-medium-write、sql-medium-delete、sql-medium-insert、sql-medium-insert-ingress）。
+E2E 仅接受明确的 `kubesql-test` context，拒绝覆盖测试所用的既有命名空间（sql-easy-select、sql-easy-where、sql-medium-write、sql-medium-delete、sql-medium-insert、sql-medium-insert-ingress、sql-hard-native）。
 测试通过 Go dynamic client 创建任务书夹具，调用真实 ksql 二进制，按行集合比较结果，最后删除并等待本套件命名空间消失。
 不需要手工提前 apply 夹具；部署副本数按任务书保留，但查询/过滤验收不要求镜像拉取或 Pod Ready。
 第 3 章覆盖 AND/OR 优先级、括号、IS NULL、= NULL，并补充 NOT UNKNOWN 的真实 CLI 用例。
@@ -214,3 +241,6 @@ E2E 仅接受明确的 `kubesql-test` context，拒绝覆盖测试所用的既�
 Deployment 注解断言仅在测试中排除 controller 自动生成的 revision 键，CLI 输出仍完整；Namespace 标签断言包含 API 恢复的标准名称标签，不把服务端补键误判为 Merge Patch 残留旧用户键。
 第 5 章严格区分 preparation.yaml 与 targets.yaml，仅创建 preparation；5-1 的 preparation 为空，Namespace 由 SQL 创建并等待 Active。targets 只比较明确字段（包括 selector/template/镜像/端口），不要求服务端默认值完全一致。
 5-2 重复创建检查 AlreadyExists、退出码 1、汇总身份、唯一对象及原资源完整内容不变。额外验证 schema 拒绝、manifest 读取、缺省 namespace 与 SQL/JSON 两层转义。
+第 6 章查询 ReplicaSet/StatefulSet/Secret/PVC/ConfigMap，并更新 ConfigMap；另验证 CAST 整对象替换、叶子添加/移除、数组读取、限定 annotation 键 Pointer 转义、通用 ConfigMap 创建/删除和 Node/Namespace 集群 scope。
+Namespace 自动出现的 kube-root-ca.crt ConfigMap 不被 CLI 隐藏；测试仅在第 6 章夹具对象比较中排除这条明确系统记录。`~0` 和 JSON null 保存的 patch 结构由离线测试验证；是否允许某路径保存 null 由具体 API schema 决定。
+接入官方 Discovery 新增了其所需的间接依赖（包括 k8s.io/api v0.35.9 和 OpenAPI 库）；client-go/apimachinery 固定版本未变，未引入新的 SQL/CRUD 框架。

@@ -3,12 +3,15 @@ package kube
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -40,7 +43,8 @@ func (c *Client) Delete(ctx context.Context, gvr schema.GroupVersionResource, ob
 }
 
 type Client struct {
-	dynamic dynamic.Interface
+	dynamic   dynamic.Interface
+	discovery discovery.DiscoveryInterface
 }
 
 func (c *Client) Create(ctx context.Context, gvr schema.GroupVersionResource, object unstructured.Unstructured) error {
@@ -48,8 +52,9 @@ func (c *Client) Create(ctx context.Context, gvr schema.GroupVersionResource, ob
 	return err
 }
 
-// Connect uses standard kubeconfig loading/merging; it sends no API requests.
-func Connect(options Options) (*Client, string, error) {
+// Connect loads standard kubeconfig without API requests and binds discovery's
+// context-less methods to this invocation's cancellation and deadline.
+func Connect(ctx context.Context, options Options) (*Client, string, error) {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	rules.ExplicitPath = options.Kubeconfig
 	overrides := &clientcmd.ConfigOverrides{CurrentContext: options.Context}
@@ -64,12 +69,43 @@ func Connect(options Options) (*Client, string, error) {
 		return nil, "", err
 	}
 	restConfig.Timeout = 30 * time.Second
+	restConfig.WrapTransport = func(next http.RoundTripper) http.RoundTripper { return contextTransport{ctx: ctx, next: next} }
 	client, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
 		return nil, "", err
 	}
-	return &Client{dynamic: client}, namespace, nil
+	discover, err := discovery.NewDiscoveryClientForConfig(restConfig)
+	if err != nil {
+		return nil, "", err
+	}
+	return &Client{dynamic: client, discovery: discover}, namespace, nil
 }
+
+type contextTransport struct {
+	ctx  context.Context
+	next http.RoundTripper
+}
+
+func (t contextTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	// Keep the dynamic request's own context too; discovery uses Background.
+	ctx, cancel := context.WithCancel(r.Context())
+	stop := context.AfterFunc(t.ctx, cancel)
+	response, err := t.next.RoundTrip(r.WithContext(ctx))
+	cleanup := func() { stop(); cancel() }
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+	response.Body = &cancelBody{ReadCloser: response.Body, cleanup: cleanup}
+	return response, nil
+}
+
+type cancelBody struct {
+	io.ReadCloser
+	cleanup func()
+}
+
+func (b *cancelBody) Close() error { defer b.cleanup(); return b.ReadCloser.Close() }
 
 func (c *Client) List(ctx context.Context, gvr schema.GroupVersionResource, namespace string) ([]unstructured.Unstructured, error) {
 	resource := c.dynamic.Resource(gvr).Namespace(namespace)

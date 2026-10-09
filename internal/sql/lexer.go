@@ -18,6 +18,7 @@ var keywords = map[string]tokenKind{
 	"NULL": tokenNull, "TRUE": tokenTrue, "FALSE": tokenFalse,
 	"UPDATE": tokenUpdate, "SET": tokenSet, "DELETE": tokenDelete,
 	"INSERT": tokenInsert, "INTO": tokenInto, "VALUES": tokenValues,
+	"AS": tokenAs, "CAST": tokenCast, "JSON": tokenJSON,
 }
 
 func newLexer(input string) *lexer {
@@ -52,6 +53,9 @@ func (l *lexer) next() (token, error) {
 		return token{kind: tokenEOF, start: start, end: start}, nil
 	}
 	r, size := l.peek()
+	if r == '"' {
+		return l.quotedIdentifier(start)
+	}
 	if r == '\'' {
 		return l.stringToken(start)
 	}
@@ -113,6 +117,31 @@ func (l *lexer) next() (token, error) {
 		l.advance(r, size)
 	}
 	return token{kind: kind, text: l.input[start.Offset:l.pos.Offset], start: start, end: l.pos}, nil
+}
+
+func (l *lexer) quotedIdentifier(start Position) (token, error) {
+	l.advance('"', 1)
+	var text strings.Builder
+	for l.pos.Offset < len(l.input) {
+		r, size := l.peek()
+		l.advance(r, size)
+		if r == '"' {
+			if l.pos.Offset < len(l.input) {
+				next, n := l.peek()
+				if next == '"' {
+					text.WriteRune(next)
+					l.advance(next, n)
+					continue
+				}
+			}
+			return token{kind: tokenQuotedIdentifier, text: text.String(), start: start, end: l.pos}, nil
+		}
+		if r == utf8.RuneError && size == 1 {
+			return token{}, &ParseError{Code: "E_PARSE", Position: start, Message: "invalid UTF-8 in identifier"}
+		}
+		text.WriteRune(r)
+	}
+	return token{}, &ParseError{Code: "E_PARSE", Position: start, Message: "unterminated quoted identifier"}
 }
 
 func (l *lexer) stringToken(start Position) (token, error) {

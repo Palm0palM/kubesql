@@ -90,10 +90,15 @@ func prepareFixtureFile(t *testing.T, directory, filename, fixtureNamespace stri
 	}
 	decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader(readFixture(t, directory, filename)), 4096)
 	resources := map[string]schema.GroupVersionResource{
-		"Namespace":  {Version: "v1", Resource: "namespaces"},
-		"Deployment": {Group: "apps", Version: "v1", Resource: "deployments"},
-		"Service":    {Version: "v1", Resource: "services"},
-		"Ingress":    {Group: "networking.k8s.io", Version: "v1", Resource: "ingresses"},
+		"Namespace":             {Version: "v1", Resource: "namespaces"},
+		"Deployment":            {Group: "apps", Version: "v1", Resource: "deployments"},
+		"Service":               {Version: "v1", Resource: "services"},
+		"Ingress":               {Group: "networking.k8s.io", Version: "v1", Resource: "ingresses"},
+		"ConfigMap":             {Version: "v1", Resource: "configmaps"},
+		"Secret":                {Version: "v1", Resource: "secrets"},
+		"ReplicaSet":            {Group: "apps", Version: "v1", Resource: "replicasets"},
+		"StatefulSet":           {Group: "apps", Version: "v1", Resource: "statefulsets"},
+		"PersistentVolumeClaim": {Version: "v1", Resource: "persistentvolumeclaims"},
 	}
 	for {
 		var object unstructured.Unstructured

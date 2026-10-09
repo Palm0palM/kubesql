@@ -80,6 +80,31 @@ func (p *parser) parsePrimary() (Expression, error) {
 		return nil, p.err
 	}
 	t := p.token
+	if t.kind == tokenCast {
+		p.advance()
+		if err := p.require(tokenLeftParen, "("); err != nil {
+			return nil, err
+		}
+		p.advance()
+		if err := p.require(tokenString, "JSON 字符串"); err != nil {
+			return nil, err
+		}
+		text := p.token.text
+		p.advance()
+		if err := p.require(tokenAs, "AS"); err != nil {
+			return nil, err
+		}
+		p.advance()
+		if err := p.require(tokenJSON, "JSON"); err != nil {
+			return nil, err
+		}
+		p.advance()
+		if err := p.require(tokenRightParen, ")"); err != nil {
+			return nil, err
+		}
+		p.advance()
+		return &JSONCast{Type: "cast_json", Text: text, Position: t.start}, p.err
+	}
 	if t.kind == tokenLeftParen {
 		p.advance()
 		expr, err := p.parseOr()
@@ -94,8 +119,12 @@ func (p *parser) parsePrimary() (Expression, error) {
 	}
 	var expr Expression
 	switch t.kind {
-	case tokenIdentifier:
-		expr = &ColumnReference{Type: "column", Name: strings.ToLower(t.text), Position: t.start}
+	case tokenIdentifier, tokenQuotedIdentifier:
+		name := t.text
+		if t.kind == tokenIdentifier {
+			name = strings.ToLower(name)
+		}
+		expr = &ColumnReference{Type: "column", Name: name, Quoted: t.kind == tokenQuotedIdentifier, Position: t.start}
 	case tokenString:
 		expr = &Literal{Type: "literal", Value: t.text, Position: t.start}
 	case tokenNumber:

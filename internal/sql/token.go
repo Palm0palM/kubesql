@@ -54,6 +54,10 @@ const (
 	tokenInsert
 	tokenInto
 	tokenValues
+	tokenQuotedIdentifier
+	tokenAs
+	tokenCast
+	tokenJSON
 )
 
 type token struct {

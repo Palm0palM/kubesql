@@ -43,8 +43,8 @@ func TestQueryScopeAndProjection(t *testing.T) {
 		all          bool
 		want         map[string]any
 	}{
-		{"namespaces", "", false, map[string]any{"name": "web"}},
-		{"namespaces", "", true, map[string]any{"name": "web"}},
+		{"namespaces", "", false, map[string]any{"name": "web", "namespace": nil}},
+		{"namespaces", "", true, map[string]any{"name": "web", "namespace": nil}},
 		{"deployments", "selected", false, map[string]any{"name": "web", "namespace": "selected", "replicas": int64(2)}},
 		{"deployments", "", true, map[string]any{"name": "web", "namespace": "selected", "replicas": int64(2)}},
 		{"ingresses", "selected", false, map[string]any{"name": "web", "namespace": "selected", "default_backend_service": "backend"}},
@@ -93,7 +93,7 @@ func TestBindRejectsUnknownAndDuplicateNames(t *testing.T) {
 	for input, code := range map[string]string{
 		"SELECT name FROM deploy":            "E_UNKNOWN_TABLE",
 		"SELECT typo FROM deployments":       "E_UNKNOWN_COLUMN",
-		"SELECT namespace FROM namespaces":   "E_UNKNOWN_COLUMN",
+		"SELECT replicas FROM namespaces":    "E_UNKNOWN_COLUMN",
 		"SELECT name, name FROM deployments": "E_DUPLICATE_COLUMN",
 	} {
 		stmt, err := sql.Parse(input)

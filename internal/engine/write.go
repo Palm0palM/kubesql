@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"strings"
 
+	"github.com/Palm0palM/kubesql/internal/resource"
 	"github.com/Palm0palM/kubesql/internal/sql"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -20,6 +21,7 @@ type assignment struct {
 	column string
 	path   []string
 	value  any
+	remove bool
 }
 
 type Write struct {
@@ -48,7 +50,7 @@ type Writer interface {
 	Delete(context.Context, schema.GroupVersionResource, unstructured.Unstructured) error
 }
 
-func BindWrite(stmt *sql.Statement, allNamespaces bool) (*Write, error) {
+func BindWrite(stmt *sql.Statement, allNamespaces bool, resolved ...resource.Descriptor) (*Write, error) {
 	if stmt.Type != "update" && stmt.Type != "delete" {
 		return nil, &Error{Code: "E_STATEMENT", Message: "expected UPDATE or DELETE"}
 	}
@@ -58,20 +60,54 @@ func BindWrite(stmt *sql.Statement, allNamespaces bool) (*Write, error) {
 	if allNamespaces {
 		return nil, &Error{Code: "E_NAMESPACE", Message: "writes do not accept --all-namespaces"}
 	}
-	query, err := Bind(stmt)
+	query, err := Bind(stmt, resolved...)
 	if err != nil {
 		return nil, err
 	}
 	write := &Write{query: query, operation: stmt.Type}
+	verb := "patch"
+	if stmt.Type == "delete" {
+		verb = "delete"
+	}
+	if err := requireVerbs(query.table, "list", verb); err != nil {
+		return nil, err
+	}
 	seen := make(map[string]bool)
 	for _, set := range stmt.Assignments {
 		if seen[set.Column] {
 			return nil, &Error{Code: "E_DUPLICATE_COLUMN", Message: "duplicate assignment column " + set.Column}
 		}
 		seen[set.Column] = true
-		a, err := bindAssignment(stmt.Table, set)
+		var a assignment
+		if set.Quoted && (set.Column == "" || strings.HasPrefix(set.Column, "/")) {
+			path, pathErr := pointerPath(set.Column)
+			if pathErr != nil {
+				return nil, pathErr
+			}
+			if protectedPath(path) {
+				return nil, &Error{Code: "E_WRITE_PROTECTED", Message: "cannot modify protected resource fields or their ancestors"}
+			}
+			value, remove, valueErr := assignmentValue(set.Value)
+			if valueErr != nil {
+				return nil, valueErr
+			}
+			a = assignment{column: set.Column, path: path, value: value, remove: remove}
+		} else {
+			known := ""
+			for name, t := range tables {
+				if t.gvr == query.table.gvr {
+					known = name
+				}
+			}
+			a, err = bindAssignment(known, set)
+		}
 		if err != nil {
 			return nil, err
+		}
+		for _, earlier := range write.assignments {
+			if pathsOverlap(earlier.path, a.path) {
+				return nil, &Error{Code: "E_OVERLAPPING_ASSIGNMENTS", Message: "assignment paths overlap"}
+			}
 		}
 		write.assignments = append(write.assignments, a)
 	}
@@ -108,6 +144,9 @@ func bindAssignment(table string, set sql.Assignment) (assignment, error) {
 		}
 		a.path = []string{"spec", "defaultBackend", "service", "name"}
 	case "labels", "annotations":
+		if literal.Value == nil {
+			return assignment{column: set.Column, path: []string{"metadata", set.Column}, remove: true}, nil
+		}
 		text, ok := literal.Value.(string)
 		if !ok {
 			return assignment{}, typeError("labels/annotations require a SQL string containing a JSON object of strings")
@@ -209,15 +248,37 @@ func (w *Write) patch(object unstructured.Unstructured) ([]byte, error) {
 				return nil, &Error{Code: "E_DEFAULT_BACKEND", Message: "Ingress has no existing Service default backend"}
 			}
 		}
-		parent, found, err := unstructured.NestedMap(object.Object, a.path[:len(a.path)-1]...)
+		parent, found, err := pointerRead(object.Object, a.path[:len(a.path)-1])
 		if err != nil || !found || parent == nil {
 			return nil, &Error{Code: "E_FIELD_PARENT", Message: "assignment parent is not an existing object"}
 		}
+		exists := false
+		switch p := parent.(type) {
+		case map[string]any:
+			_, exists = p[a.path[len(a.path)-1]]
+		case []any:
+			index, err := arrayIndex(a.path[len(a.path)-1])
+			if err != nil {
+				return nil, err
+			}
+			if index >= len(p) || a.remove {
+				return nil, &Error{Code: "E_ARRAY_WRITE", Message: "array writes only replace existing indices; insertion/removal is unsupported"}
+			}
+			exists = true
+		default:
+			return nil, &Error{Code: "E_FIELD_PARENT", Message: "assignment parent is not an existing object or array"}
+		}
+		if a.remove {
+			if exists {
+				operations = append(operations, patchOperation{Op: "remove", Path: encodePointer(a.path)})
+			}
+			continue
+		}
 		op := "add"
-		if _, exists := parent[a.path[len(a.path)-1]]; exists {
+		if exists {
 			op = "replace"
 		}
-		operations = append(operations, patchOperation{op, "/" + strings.Join(a.path, "/"), a.value})
+		operations = append(operations, patchOperation{Op: op, Path: encodePointer(a.path), Value: a.value})
 	}
 	patch, err := json.Marshal(operations)
 	if err != nil {

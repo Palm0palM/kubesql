@@ -75,7 +75,7 @@ func (p *parser) selectStatement() (*Statement, error) {
 		stmt.Columns = []Column{{Type: "star", Position: p.token.start}}
 		p.advance()
 	} else {
-		columns, err := p.columnList()
+		columns, err := p.columnList(true)
 		if err != nil {
 			return nil, err
 		}
@@ -85,11 +85,11 @@ func (p *parser) selectStatement() (*Statement, error) {
 		return nil, err
 	}
 	p.advance()
-	if err := p.require(tokenIdentifier, "表名"); err != nil {
+	name, quoted, err := p.identifier("表名")
+	if err != nil {
 		return nil, err
 	}
-	stmt.Table = strings.ToLower(p.token.text)
-	p.advance()
+	stmt.Table, stmt.TableQuoted = name, quoted
 	if err := p.optionalWhere(stmt); err != nil {
 		return nil, err
 	}
@@ -108,16 +108,28 @@ func (p *parser) optionalWhere(stmt *Statement) error {
 	return p.err
 }
 
-func (p *parser) columnList() ([]Column, error) {
+func (p *parser) columnList(allowAlias bool) ([]Column, error) {
 	var columns []Column
 	for {
-		if err := p.require(tokenIdentifier, "列名"); err != nil {
+		position := p.token.start
+		name, quoted, err := p.identifier("列名")
+		if err != nil {
 			return nil, err
 		}
-		columns = append(columns, Column{
-			Type: "column", Name: strings.ToLower(p.token.text), Position: p.token.start,
-		})
-		p.advance()
+		c := Column{Type: "column", Name: name, Quoted: quoted, Position: position}
+		if allowAlias && p.token.kind == tokenAs {
+			p.advance()
+			position := p.token.start
+			alias, _, err := p.identifier("别名")
+			if err != nil {
+				return nil, err
+			}
+			if alias == "" {
+				return nil, &ParseError{Code: "E_PARSE", Position: position, Message: "empty alias is unsupported"}
+			}
+			c.Alias = alias
+		}
+		columns = append(columns, c)
 		if p.err != nil {
 			return nil, p.err
 		}
@@ -126,4 +138,22 @@ func (p *parser) columnList() ([]Column, error) {
 		}
 		p.advance()
 	}
+}
+
+func (p *parser) identifier(expected string) (string, bool, error) {
+	if p.err != nil {
+		return "", false, p.err
+	}
+	quoted := p.token.kind == tokenQuotedIdentifier
+	if !quoted {
+		if err := p.require(tokenIdentifier, expected); err != nil {
+			return "", false, err
+		}
+	}
+	text := p.token.text
+	if !quoted {
+		text = strings.ToLower(text)
+	}
+	p.advance()
+	return text, quoted, p.err
 }

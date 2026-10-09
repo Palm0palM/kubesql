@@ -26,12 +26,11 @@ func bindExpression(expr sql.Expression, t table) (*boundExpression, error) {
 		}
 		return &boundExpression{kind: v.kind, literal: &v}, nil
 	case *sql.ColumnReference:
-		for _, c := range t.columns {
-			if c.name == e.Name {
-				return &boundExpression{kind: c.kind, field: &c}, nil
-			}
+		c, err := resolveColumn(e.Name, e.Quoted, t)
+		if err != nil {
+			return nil, err
 		}
-		return nil, &Error{Code: "E_UNKNOWN_COLUMN", Message: "unknown WHERE column " + e.Name}
+		return &boundExpression{kind: c.kind, field: &c}, nil
 	case *sql.UnaryExpression:
 		operand, err := bindExpression(e.Operand, t)
 		if err != nil {
@@ -56,7 +55,7 @@ func bindExpression(expr sql.Expression, t table) (*boundExpression, error) {
 			}
 		} else if left.kind == objectKind || right.kind == objectKind {
 			return nil, typeError("WHERE comparisons require scalar values")
-		} else if left.kind != nullKind && right.kind != nullKind && left.kind != right.kind {
+		} else if left.kind != dynamicKind && right.kind != dynamicKind && left.kind != nullKind && right.kind != nullKind && left.kind != right.kind {
 			return nil, typeError("comparison operands have incompatible types")
 		}
 		return &boundExpression{kind: boolKind, operator: e.Operator, left: left, right: right}, nil
@@ -65,9 +64,17 @@ func bindExpression(expr sql.Expression, t table) (*boundExpression, error) {
 	}
 }
 
-func booleanKind(kind valueKind) bool { return kind == boolKind || kind == nullKind }
+func booleanKind(kind valueKind) bool {
+	return kind == boolKind || kind == nullKind || kind == dynamicKind
+}
 
 func readColumn(object unstructured.Unstructured, c column) (any, error) {
+	if c.pointer {
+		return readPointer(object, c.path)
+	}
+	if c.name == "namespace" && c.path == nil {
+		return nil, nil
+	}
 	value, _, err := unstructured.NestedFieldNoCopy(object.Object, c.path...)
 	if err != nil {
 		return nil, typeError("invalid structure for column " + c.name)
@@ -85,6 +92,15 @@ func (e *boundExpression) evaluate(object unstructured.Unstructured) (value, err
 			return value{}, err
 		}
 		v, err := scalarValue(raw)
+		if e.kind == dynamicKind {
+			if _, ok := raw.(map[string]any); ok {
+				return value{kind: objectKind, scalar: raw}, nil
+			}
+			if _, ok := raw.([]any); ok {
+				return value{kind: objectKind, scalar: raw}, nil
+			}
+			return v, err
+		}
 		if e.kind == objectKind {
 			if raw == nil {
 				return value{kind: nullKind}, nil
@@ -140,6 +156,9 @@ func (e *boundExpression) evaluate(object unstructured.Unstructured) (value, err
 }
 
 func compare(operator string, left, right value) (value, error) {
+	if left.kind == objectKind || right.kind == objectKind {
+		return value{}, typeError("comparison requires scalar values")
+	}
 	if left.isNull() || right.isNull() {
 		return boolean(unknown), nil
 	}

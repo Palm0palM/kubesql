@@ -53,6 +53,9 @@ func TestCLIRoutingAndJSON(t *testing.T) {
 		t.Run(tt.query+tt.path, func(t *testing.T) {
 			calls := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if serveDiscovery(w, r) {
+					return
+				}
 				calls++
 				if r.URL.Path != tt.path {
 					t.Errorf("path = %s, want %s", r.URL.Path, tt.path)
@@ -93,7 +96,6 @@ func TestCLIErrorsBeforeAPI(t *testing.T) {
 		flags       []string
 	}{
 		{"SELECT name, FROM deployments;", "E_PARSE", nil},
-		{"SELECT name FROM ns;", "E_UNKNOWN_TABLE", nil},
 		{"SELECT typo FROM deployments;", "E_UNKNOWN_COLUMN", nil},
 		{"SELECT name FROM deployments WHERE typo IS NULL;", "E_UNKNOWN_COLUMN", nil},
 		{"SELECT name FROM deployments WHERE replicas = '3';", "E_TYPE", nil},
@@ -123,6 +125,9 @@ func TestCLIErrorsBeforeAPI(t *testing.T) {
 
 func TestCLIForbiddenAndHelp(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveDiscovery(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		fmt.Fprint(w, `{"kind":"Status","apiVersion":"v1","reason":"Forbidden","message":"access denied","code":403}`)
@@ -143,6 +148,9 @@ func TestCLIForbiddenAndHelp(t *testing.T) {
 
 func TestCLIWhereRuntimeErrorHasNoPartialOutput(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveDiscovery(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"apiVersion":"apps/v1","kind":"DeploymentList","items":[{"metadata":{"name":"valid"},"spec":{"replicas":3}},{"metadata":{"name":"invalid"},"spec":{"replicas":"sensitive-payload"}}]}`)
 	}))

@@ -35,19 +35,19 @@ func TestConfigNamespaceAndContext(t *testing.T) {
 		{"", "", "context-ns"}, {"other", "", "default"},
 		{"other", "explicit", "explicit"}, {"", "explicit", "explicit"},
 	} {
-		_, got, err := Connect(Options{Kubeconfig: path, Context: tt.context, Namespace: tt.namespace})
+		_, got, err := Connect(context.Background(), Options{Kubeconfig: path, Context: tt.context, Namespace: tt.namespace})
 		if err != nil || got != tt.want {
 			t.Fatalf("options = %+v, namespace = %q, error = %v", tt, got, err)
 		}
 	}
 	t.Setenv("KUBECONFIG", path)
-	if _, got, err := Connect(Options{}); err != nil || got != "context-ns" {
+	if _, got, err := Connect(context.Background(), Options{}); err != nil || got != "context-ns" {
 		t.Fatalf("KUBECONFIG: namespace = %q, error = %v", got, err)
 	}
-	if _, _, err := Connect(Options{Kubeconfig: path, Context: "missing"}); err == nil {
+	if _, _, err := Connect(context.Background(), Options{Kubeconfig: path, Context: "missing"}); err == nil {
 		t.Fatal("missing context must fail")
 	}
-	if _, _, err := Connect(Options{Kubeconfig: filepath.Join(t.TempDir(), "missing")}); err == nil {
+	if _, _, err := Connect(context.Background(), Options{Kubeconfig: filepath.Join(t.TempDir(), "missing")}); err == nil {
 		t.Fatal("missing explicit kubeconfig must fail")
 	}
 }
@@ -70,7 +70,7 @@ func TestDynamicListPaginationAndIntegerPrecision(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	client, _, err := Connect(Options{Kubeconfig: writeConfig(t, server.URL)})
+	client, _, err := Connect(context.Background(), Options{Kubeconfig: writeConfig(t, server.URL)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestListPreservesForbiddenAndCancellation(t *testing.T) {
 		fmt.Fprint(w, `{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Forbidden","message":"access denied","code":403}`)
 	}))
 	defer server.Close()
-	client, _, err := Connect(Options{Kubeconfig: writeConfig(t, server.URL)})
+	client, _, err := Connect(context.Background(), Options{Kubeconfig: writeConfig(t, server.URL)})
 	if err != nil {
 		t.Fatal(err)
 	}

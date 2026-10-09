@@ -11,6 +11,7 @@ import (
 
 	"github.com/Palm0palM/kubesql/internal/engine"
 	"github.com/Palm0palM/kubesql/internal/kube"
+	"github.com/Palm0palM/kubesql/internal/resource"
 	"github.com/Palm0palM/kubesql/internal/sql"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
@@ -60,22 +61,41 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	var query *engine.Query
 	var write *engine.Write
 	var insert *engine.Insert
+	if err := engine.Preflight(stmt, *all); err != nil {
+		return fail(stderr, 2, err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	client, namespace, err := kube.Connect(ctx, options)
+	if err != nil {
+		return fail(stderr, 1, diagnostic{Code: "E_CONFIG", Message: err.Error()})
+	}
+	if stmt.Type == "insert" {
+		if err := engine.Preflight(stmt, *all, namespace); err != nil {
+			return fail(stderr, 2, err)
+		}
+	}
+	descriptor, err := client.Resolve(ctx, stmt.Table, stmt.TableQuoted)
+	if err != nil {
+		if detail, ok := errors.AsType[*resource.Error](err); ok {
+			code := 2
+			if detail.Code == "E_DISCOVERY" {
+				code = 1
+			}
+			return fail(stderr, code, detail)
+		}
+		return fail(stderr, 1, diagnostic{Code: "E_DISCOVERY", Message: "API discovery failed"})
+	}
 	if stmt.Type == "select" {
-		query, err = engine.Bind(stmt)
+		query, err = engine.Bind(stmt, descriptor)
 	} else if stmt.Type == "insert" {
-		insert, err = engine.BindInsert(stmt, *all)
+		insert, err = engine.BindInsert(stmt, *all, descriptor)
 	} else {
-		write, err = engine.BindWrite(stmt, *all)
+		write, err = engine.BindWrite(stmt, *all, descriptor)
 	}
 	if err != nil {
 		return fail(stderr, 2, err)
 	}
-	client, namespace, err := kube.Connect(options)
-	if err != nil {
-		return fail(stderr, 1, diagnostic{Code: "E_CONFIG", Message: err.Error()})
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 	var outputValue any
 	exitCode := 0
 	if write != nil || insert != nil {
@@ -96,7 +116,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		if semantic, ok := errors.AsType[*engine.Error](err); ok {
 			return fail(stderr, 2, semantic)
 		}
-		return fail(stderr, 1, diagnostic{Code: "E_API", Message: err.Error(), Reason: string(apierrors.ReasonForError(err))})
+		return fail(stderr, 1, diagnostic{Code: "E_API", Message: "API request failed", Reason: string(apierrors.ReasonForError(err))})
 	}
 	if err := json.NewEncoder(stdout).Encode(outputValue); err != nil {
 		return fail(stderr, 1, diagnostic{Code: "E_OUTPUT", Message: "cannot write JSON results"})

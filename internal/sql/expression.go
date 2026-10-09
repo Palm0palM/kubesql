@@ -14,8 +14,18 @@ type Literal struct {
 type ColumnReference struct {
 	Type     string   `json:"type"`
 	Name     string   `json:"name"`
+	Quoted   bool     `json:"quoted,omitempty"`
 	Position Position `json:"-"`
 }
+
+// JSONCast is deliberately limited to CAST(SQL-string AS JSON).
+type JSONCast struct {
+	Type     string   `json:"type"`
+	Text     string   `json:"text"`
+	Position Position `json:"-"`
+}
+
+func (*JSONCast) expressionNode() {}
 
 type UnaryExpression struct {
 	Type     string     `json:"type"`
