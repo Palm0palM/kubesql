@@ -8,9 +8,9 @@
 
 ## 当前状态
 
-M0–M5 已完成并提交；M6 Discovery/通用 CRUD 已实现，等待代码审查。
+M0–M6 已完成并提交；M7 Metrics 已实现并验证。
 CLI 通过官方 client-go dynamic client 查询和操作 Kubernetes，支持连接参数、命名空间选择和 JSON 输出。
-任务书第 2–6 章已通过真实集群 CLI E2E，夹具资源已清理；第 1 章通过离线语法测试。
+任务书第 2–7 章已通过真实集群 CLI E2E，夹具资源已清理；第 1 章通过离线语法测试。
 
 本地设计与计划保存在被忽略的 `docs/` 中，不提供远端不可用的文档链接。
 
@@ -22,7 +22,7 @@ internal/cli/   flags、stdin、错误/结果输出、依赖装配
 internal/sql/   token、lexer、Statement/表达式 AST、递归下降 parser
 internal/engine/ 三表绑定、三值逻辑、过滤/投影、精确 patch 与写入汇总
 internal/resource/ 共享 Discovery 描述（GVR/Kind/scope/verbs）与发现错误
-internal/kube/  kubeconfig、Discovery 快照、dynamic List/Patch/Delete/Create
+internal/kube/  kubeconfig、Discovery 快照、dynamic CRUD、Metrics Quantity 汇总
 test/e2e/       显式启用的真实集群 CLI 测试
 testdata/       可复用 YAML、SQL 和预期 JSON
 go.mod/go.sum   Go 版本与固定依赖（client-go/apimachinery v0.35.9）
@@ -73,7 +73,7 @@ SELECT * FROM ingresses
 AST 保留独立星号节点，不展开字段、不检查表名或列名是否存在。
 错误为 `E_PARSE`，包含从 1 开始的行列位置。任务书 1-1 的 JSON AST 和 1-2 的第 1 行第 14 列错误均由单元测试验证。
 未知列、重复输出键、已知类型及写保护等错误先于 Discovery；未知表必须由实际 Discovery 判断，因此可产生 Discovery 请求，但不发送资源 List/写入请求。空查询结果为 `[]`。
-当前不支持 JOIN、Metrics 虚拟表、批量 INSERT、create-only Review 特殊规则，也不增加 `--parse-only` 参数。CRD 注册/版本变更/聚合 API 特殊能力未做第 8 章验收，不声称已完成 M8。
+当前不支持 JOIN、批量 INSERT、create-only Review 特殊规则，也不增加 `--parse-only` 参数。CRD 注册/版本变更/聚合 API 特殊能力未做第 8 章验收，不声称已完成 M8。
 
 | 表 | SELECT * 公开列 |
 | --- | --- |
@@ -218,7 +218,7 @@ MINIKUBE_HOME="$PWD/tmp/minikube" KUBECONFIG="$PWD/tmp/kube/config" ./tmp/tools/
 ```
 
 镜像源属于第三方，本次拉取成功不保证后续可用，也未与上游镜像独立比对。
-环境冒烟 Deployment 使用 0 副本：业务镜像拉取、业务 Pod 网络、Ingress 流量、Metrics Server 均尚未验证。
+M7 已验证 Metrics Server 可用、busybox 双容器 Pod Ready 与实际指标；其他业务镜像、业务网络和 Ingress 流量不据此声称已验证。
 测试集群保留供后续开发；本次创建的 `sql-m0-smoke` 命名空间及其资源已清理。
 
 ## 真实集群 E2E
@@ -233,7 +233,7 @@ go test -tags=e2e -count=1 -v ./test/e2e
 ```
 
 默认 `go test ./...` 不运行 E2E。显式启用时若缺少上述配置会失败，不把未运行当作通过。
-E2E 仅接受明确的 `kubesql-test` context，拒绝覆盖测试所用的既有命名空间（sql-easy-select、sql-easy-where、sql-medium-write、sql-medium-delete、sql-medium-insert、sql-medium-insert-ingress、sql-hard-native）。
+E2E 仅接受明确的 `kubesql-test` context，拒绝覆盖测试所用的既有命名空间（sql-easy-select、sql-easy-where、sql-medium-write、sql-medium-delete、sql-medium-insert、sql-medium-insert-ingress、sql-hard-native、sql-hard-metrics）。
 测试通过 Go dynamic client 创建任务书夹具，调用真实 ksql 二进制，按行集合比较结果，最后删除并等待本套件命名空间消失。
 不需要手工提前 apply 夹具；部署副本数按任务书保留，但查询/过滤验收不要求镜像拉取或 Pod Ready。
 第 3 章覆盖 AND/OR 优先级、括号、IS NULL、= NULL，并补充 NOT UNKNOWN 的真实 CLI 用例。
@@ -244,3 +244,34 @@ Deployment 注解断言仅在测试中排除 controller 自动生成的 revision
 第 6 章查询 ReplicaSet/StatefulSet/Secret/PVC/ConfigMap，并更新 ConfigMap；另验证 CAST 整对象替换、叶子添加/移除、数组读取、限定 annotation 键 Pointer 转义、通用 ConfigMap 创建/删除和 Node/Namespace 集群 scope。
 Namespace 自动出现的 kube-root-ca.crt ConfigMap 不被 CLI 隐藏；测试仅在第 6 章夹具对象比较中排除这条明确系统记录。`~0` 和 JSON null 保存的 patch 结构由离线测试验证；是否允许某路径保存 null 由具体 API schema 决定。
 接入官方 Discovery 新增了其所需的间接依赖（包括 k8s.io/api v0.35.9 和 OpenAPI 库）；client-go/apimachinery 固定版本未变，未引入新的 SQL/CRUD 框架。
+
+### 实际指标（M7）
+
+```sql
+SELECT name, cpu_millicores, memory_bytes FROM pod_metrics WHERE name = 'measure';
+SELECT name, cpu_millicores, memory_bytes FROM node_metrics WHERE name = 'kubesql-test';
+```
+
+| 只读虚拟表 | 公开列（SELECT *） |
+| --- | --- |
+| pod_metrics | name、namespace、cpu_millicores、memory_bytes |
+| node_metrics | name、cpu_millicores、memory_bytes |
+
+- 从真实 `metrics.k8s.io/v1beta1` API 读取 PodMetrics/NodeMetrics，复用官方 dynamic client；不是 Pod 的 requests/limits，也不读 kubectl 输出。
+- 每 Pod 一行，先用 Quantity 累加全部容器的 CPU/内存，再转换整数 millicores/bytes；例如两容器各 400u CPU，合计输出 1m 而不是分别舍入成 2m。Node 使用节点实际 usage。
+- 固定只读 schema，不暴露 manifest/JSON Pointer，不走普通资源 Discovery；UPDATE/DELETE/INSERT、未知列和已知 WHERE 类型错误在连接前拒绝。WHERE、AS、投影和三值逻辑复用原查询引擎。
+- Pod namespace 与原查询规则一致，支持 --all-namespaces；Node 是集群级查询，不受 --namespace 限制，没有 namespace 列。
+- Metrics Server 未安装/不可用返回 E_METRICS_UNAVAILABLE、退出 1；403 保留 Forbidden，错误不回显 API 字段值。空样本返回 `[]`，不伪造零值；畸形/缺失/负数/越界样本返回 E_METRICS_DATA。
+- 固定样本已验证 150m/83886080 bytes 和 250m/536870912 bytes；真实用量会变化，只验证身份、一行及非负整数。
+- E2E 为双容器 Pod Ready 和 Metrics 样本共设置最长 180 秒等待；读取 Node 也确认一行非负整数。测试清理业务 Namespace，保留测试集群 Metrics Server 供后续使用。
+
+在独立测试 profile 启用 Metrics Server：
+
+```sh
+MINIKUBE_HOME="$PWD/tmp/minikube" KUBECONFIG="$PWD/tmp/kube/config" \
+  ./tmp/tools/minikube addons enable metrics-server -p kubesql-test
+./tmp/tools/kubectl --kubeconfig "$PWD/tmp/kube/config" --context kubesql-test \
+  rollout status deployment/metrics-server -n kube-system --timeout=180s
+```
+
+本次 addon 为 Metrics Server v0.9.0，官方镜像拉取超时，从 `k8s.m.daocloud.io/metrics-server/metrics-server:v0.9.0` 拉取（digest 与 addon 指定值一致），重标记并加载到测试 profile。为使用已加载镜像，仅把本次 addon 的镜像引用从带 digest 改为同版本本地标签；未修改全局镜像源。busybox:1.36 同样经镜像源下载并加载。镜像源为第三方，不保证后续可用。

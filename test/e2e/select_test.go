@@ -99,6 +99,7 @@ func prepareFixtureFile(t *testing.T, directory, filename, fixtureNamespace stri
 		"ReplicaSet":            {Group: "apps", Version: "v1", Resource: "replicasets"},
 		"StatefulSet":           {Group: "apps", Version: "v1", Resource: "statefulsets"},
 		"PersistentVolumeClaim": {Version: "v1", Resource: "persistentvolumeclaims"},
+		"Pod":                   {Version: "v1", Resource: "pods"},
 	}
 	for {
 		var object unstructured.Unstructured

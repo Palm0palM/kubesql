@@ -61,7 +61,13 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	var query *engine.Query
 	var write *engine.Write
 	var insert *engine.Insert
-	if err := engine.Preflight(stmt, *all); err != nil {
+	metrics := engine.IsMetrics(stmt)
+	if metrics {
+		query, err = engine.BindMetrics(stmt)
+	} else {
+		err = engine.Preflight(stmt, *all)
+	}
+	if err != nil {
 		return fail(stderr, 2, err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -75,26 +81,28 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return fail(stderr, 2, err)
 		}
 	}
-	descriptor, err := client.Resolve(ctx, stmt.Table, stmt.TableQuoted)
-	if err != nil {
-		if detail, ok := errors.AsType[*resource.Error](err); ok {
-			code := 2
-			if detail.Code == "E_DISCOVERY" {
-				code = 1
+	if !metrics {
+		descriptor, err := client.Resolve(ctx, stmt.Table, stmt.TableQuoted)
+		if err != nil {
+			if detail, ok := errors.AsType[*resource.Error](err); ok {
+				code := 2
+				if detail.Code == "E_DISCOVERY" {
+					code = 1
+				}
+				return fail(stderr, code, detail)
 			}
-			return fail(stderr, code, detail)
+			return fail(stderr, 1, diagnostic{Code: "E_DISCOVERY", Message: "API discovery failed"})
 		}
-		return fail(stderr, 1, diagnostic{Code: "E_DISCOVERY", Message: "API discovery failed"})
-	}
-	if stmt.Type == "select" {
-		query, err = engine.Bind(stmt, descriptor)
-	} else if stmt.Type == "insert" {
-		insert, err = engine.BindInsert(stmt, *all, descriptor)
-	} else {
-		write, err = engine.BindWrite(stmt, *all, descriptor)
-	}
-	if err != nil {
-		return fail(stderr, 2, err)
+		if stmt.Type == "select" {
+			query, err = engine.Bind(stmt, descriptor)
+		} else if stmt.Type == "insert" {
+			insert, err = engine.BindInsert(stmt, *all, descriptor)
+		} else {
+			write, err = engine.BindWrite(stmt, *all, descriptor)
+		}
+		if err != nil {
+			return fail(stderr, 2, err)
+		}
 	}
 	var outputValue any
 	exitCode := 0
@@ -109,10 +117,15 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		if result != nil && result.FailedRows != 0 {
 			exitCode = 1
 		}
+	} else if metrics {
+		outputValue, err = query.ExecuteMetrics(ctx, client, namespace, *all)
 	} else {
 		outputValue, err = query.Execute(ctx, client, namespace, *all)
 	}
 	if err != nil {
+		if detail, ok := errors.AsType[*resource.Error](err); ok {
+			return fail(stderr, 1, detail)
+		}
 		if semantic, ok := errors.AsType[*engine.Error](err); ok {
 			return fail(stderr, 2, semantic)
 		}
