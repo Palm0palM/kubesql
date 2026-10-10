@@ -201,6 +201,28 @@ func TestHardCRDNamespaced(t *testing.T) {
 	executeSQL(t, ctx, binary, args, string(readFixture(t, "hard-crd", "delete.sql")), `{"affected_rows":1}`)
 	waitAbsent(t, ctx, resource, "extra")
 	executeSQL(t, ctx, binary, args, `SELECT name, "/spec/size" AS size FROM "lab.example.com/v1/gadgets"`, `[{"name":"sample","size":3}]`)
+	// A nullable CRD field proves actual API persistence, not just patch encoding:
+	// CAST JSON null retains a key while SQL NULL removes it.
+	executeSQL(t, ctx, binary, args, `UPDATE gadgets SET "/spec/optional" = CAST('null' AS JSON) WHERE name = 'sample'`, `{"affected_rows":1}`)
+	nullObject, err := resource.Get(ctx, "sample", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, found, err := unstructured.NestedFieldNoCopy(nullObject.Object, "spec", "optional")
+	if err != nil || !found || value != nil {
+		t.Fatalf("JSON null was not persisted: found=%v,value=%v,error=%v", found, value, err)
+	}
+	executeSQL(t, ctx, binary, args, `UPDATE gadgets SET "/spec/optional" = NULL WHERE name = 'sample'`, `{"affected_rows":1}`)
+	removed, err := resource.Get(ctx, "sample", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, found, err = unstructured.NestedFieldNoCopy(removed.Object, "spec", "optional")
+	if err != nil || found {
+		t.Fatalf("SQL NULL did not remove optional key: found=%v,error=%v", found, err)
+	}
+	executeSQL(t, ctx, binary, args, `UPDATE gadgets SET "/spec/optional" = 'plain' WHERE name = 'sample'`, `{"affected_rows":1}`)
+	executeSQL(t, ctx, binary, args, `SELECT "/spec/optional" AS optional FROM gadgets WHERE name = 'sample'`, `[{"optional":"plain"}]`)
 	// API schema, not SQL coercion, rejects invalid values; existing object is untouched.
 	before, err := resource.Get(ctx, "sample", metav1.GetOptions{})
 	if err != nil {
@@ -238,6 +260,13 @@ func TestHardCRDNamespaced(t *testing.T) {
 	executeSQL(t, ctx, binary, args, `SELECT name, "/apiVersion" AS version FROM "lab.example.com/v1beta1/gadgets" WHERE name = 'sample'`, `[{"name":"sample","version":"lab.example.com/v1beta1"}]`)
 	executeSQL(t, ctx, binary, args, `INSERT INTO "lab.example.com/v1beta1/gadgets" (manifest) VALUES ('{"apiVersion":"lab.example.com/v1beta1","kind":"Widget","metadata":{"name":"beta"},"spec":{"size":4}}')`, `{"affected_rows":1}`)
 	executeSQL(t, ctx, binary, args, `SELECT name, "/spec/size" AS size FROM gadgets WHERE name = 'beta'`, `[{"name":"beta","size":4}]`)
+	// Both manifest creation and SQL/CAST updates must preserve >2^53 integers.
+	executeSQL(t, ctx, binary, args, `INSERT INTO gadgets (manifest) VALUES ('{"apiVersion":"lab.example.com/v1","kind":"Widget","metadata":{"name":"precise"},"spec":{"size":9007199254740993}}')`, `{"affected_rows":1}`)
+	executeSQL(t, ctx, binary, args, `SELECT "/spec/size" AS size FROM gadgets WHERE name = 'precise' AND "/spec/size" > 9007199254740992`, `[{"size":9007199254740993}]`)
+	executeSQL(t, ctx, binary, args, `UPDATE gadgets SET "/spec/size" = 9007199254740995 WHERE name = 'precise'`, `{"affected_rows":1}`)
+	executeSQL(t, ctx, binary, args, `SELECT "/spec/size" AS size FROM gadgets WHERE name = 'precise'`, `[{"size":9007199254740995}]`)
+	executeSQL(t, ctx, binary, args, `UPDATE gadgets SET "/spec/size" = CAST('9007199254740997' AS JSON) WHERE name = 'precise'`, `{"affected_rows":1}`)
+	executeSQL(t, ctx, binary, args, `SELECT "/spec/size" AS size FROM gadgets WHERE name = 'precise'`, `[{"size":9007199254740997}]`)
 	expectWriteFailure(t, ctx, binary, args, `UPDATE "apiextensions.k8s.io/v1/customresourcedefinitions" SET "/spec/scope" = 'Cluster' WHERE name = 'gadgets.lab.example.com'`, "customresourcedefinitions", "gadgets.lab.example.com", "Invalid")
 	// A stale optimistic patch is rejected by the real API, not just a fake reactor.
 	stale, _ := json.Marshal([]map[string]any{{"op": "test", "path": "/metadata/resourceVersion", "value": before.GetResourceVersion()}, {"op": "replace", "path": "/spec/size", "value": 9}})

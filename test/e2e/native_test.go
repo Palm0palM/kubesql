@@ -4,10 +4,15 @@ package e2e
 
 import (
 	"bytes"
+	"encoding/json"
 	"os/exec"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 func TestHardNative(t *testing.T) {
@@ -55,4 +60,48 @@ func TestHardNative(t *testing.T) {
 	// Cluster-level namespace is NULL regardless of the unrelated CLI namespace.
 	executeSQL(t, ctx, binary, args, `SELECT name, namespace FROM "v1/namespaces" WHERE name = 'sql-hard-native'`, `[{"name":"sql-hard-native","namespace":null}]`)
 	executeSQL(t, ctx, binary, args, `SELECT name, namespace FROM "v1/nodes" WHERE name = 'kubesql-test'`, `[{"name":"kubesql-test","namespace":null}]`)
+	// Freeze acceptance: exercise every ordinary resource family listed by the
+	// task, not just the five fixture queries. This is read-only routing coverage;
+	// an empty resource list is valid and does not claim workload readiness.
+	client := testClient(t)
+	for _, tt := range []struct {
+		table   string
+		cluster bool
+	}{
+		{"v1/pods", false}, {"v1/nodes", true}, {"v1/services", false},
+		{"apps/v1/replicasets", false}, {"apps/v1/statefulsets", false}, {"apps/v1/daemonsets", false},
+		{"batch/v1/jobs", false}, {"batch/v1/cronjobs", false}, {"v1/configmaps", false}, {"v1/secrets", false},
+		{"v1/persistentvolumes", true}, {"v1/persistentvolumeclaims", false}, {"storage.k8s.io/v1/storageclasses", true},
+		{"v1/serviceaccounts", false}, {"rbac.authorization.k8s.io/v1/roles", false}, {"rbac.authorization.k8s.io/v1/clusterroles", true},
+		{"rbac.authorization.k8s.io/v1/rolebindings", false}, {"rbac.authorization.k8s.io/v1/clusterrolebindings", true},
+	} {
+		t.Run("catalog/"+tt.table, func(t *testing.T) {
+			index := strings.LastIndex(tt.table, "/")
+			gv, err := schema.ParseGroupVersion(tt.table[:index])
+			if err != nil {
+				t.Fatal(err)
+			}
+			namespace := "sql-hard-native"
+			if tt.cluster {
+				namespace = ""
+			}
+			objects, err := client.Resource(gv.WithResource(tt.table[index+1:])).Namespace(namespace).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows := make([]map[string]any, 0, len(objects.Items))
+			for _, object := range objects.Items {
+				var ns any = object.GetNamespace()
+				if tt.cluster {
+					ns = nil
+				}
+				rows = append(rows, map[string]any{"name": object.GetName(), "namespace": ns})
+			}
+			want, err := json.Marshal(rows)
+			if err != nil {
+				t.Fatal(err)
+			}
+			executeSQL(t, ctx, binary, args, `SELECT name, namespace FROM "`+tt.table+`"`, string(want))
+		})
+	}
 }

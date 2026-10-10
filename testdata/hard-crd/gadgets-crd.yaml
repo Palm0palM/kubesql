@@ -26,3 +26,6 @@ spec:
                   minimum: 1
                 message:
                   type: string
+                optional:
+                  type: string
+                  nullable: true
