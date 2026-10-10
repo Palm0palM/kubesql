@@ -8,9 +8,9 @@
 
 ## 当前状态
 
-M0–M6 已完成并提交；M7 Metrics 已实现并验证。
+M0–M7 已完成并提交；M8 CRD/CR、Review 与能力边界已实现并验证。
 CLI 通过官方 client-go dynamic client 查询和操作 Kubernetes，支持连接参数、命名空间选择和 JSON 输出。
-任务书第 2–7 章已通过真实集群 CLI E2E，夹具资源已清理；第 1 章通过离线语法测试。
+任务书第 2–8 章已通过真实集群 CLI E2E，夹具资源已清理；第 1 章通过离线语法测试。
 
 本地设计与计划保存在被忽略的 `docs/` 中，不提供远端不可用的文档链接。
 
@@ -73,7 +73,7 @@ SELECT * FROM ingresses
 AST 保留独立星号节点，不展开字段、不检查表名或列名是否存在。
 错误为 `E_PARSE`，包含从 1 开始的行列位置。任务书 1-1 的 JSON AST 和 1-2 的第 1 行第 14 列错误均由单元测试验证。
 未知列、重复输出键、已知类型及写保护等错误先于 Discovery；未知表必须由实际 Discovery 判断，因此可产生 Discovery 请求，但不发送资源 List/写入请求。空查询结果为 `[]`。
-当前不支持 JOIN、批量 INSERT、create-only Review 特殊规则，也不增加 `--parse-only` 参数。CRD 注册/版本变更/聚合 API 特殊能力未做第 8 章验收，不声称已完成 M8。
+当前不支持 JOIN、批量 INSERT、generateName、子资源操作或流式接口，也不增加 `--parse-only` 参数。CRD/CR 与 create-only Review 走同一 Discovery/dynamic 路由；聚合 API 部分失败另有 HTTP 验证。
 
 | 表 | SELECT * 公开列 |
 | --- | --- |
@@ -145,7 +145,7 @@ SELECT manifest FROM namespaces WHERE name = 'example';
 ```
 
 - 支持单个 VALUES 元组，仅允许 manifest 列和一个 SQL 字符串值。SQL lexer 先解码 `''`，独立 JSON 解码器再处理 JSON 转义；不支持批量创建。
-- manifest 必须是一个完整 JSON 对象；apiVersion/kind 必须匹配 Discovery 实际选中的 GVR/Kind，metadata.name 必须为非空字符串。本阶段不支持 generateName，也不放宽 create-only 请求对象的名称规则。
+- manifest 必须是一个完整 JSON 对象；apiVersion/kind 必须匹配 Discovery 实际选中的 GVR/Kind。持久化资源的 metadata.name 必须为非空字符串；M8 起 create-only 请求对象不强制 name，见下文。不支持 generateName。
 - 拒绝顶层 status 及 metadata 中 uid、resourceVersion、managedFields、generation、creationTimestamp、deletionTimestamp、deletionGracePeriodSeconds、selfLink，字段即便为 null 也拒绝。
 - Deployment/Ingress 未指定 namespace（或为空）时填入 CLI 解析出的 namespace；非空且不一致时报 E_NAMESPACE，不发送 API 请求。Namespace 不得带非空 namespace；所有 INSERT 拒绝 --all-namespaces。
 - 本地 JSON、列、服务器字段检查先于 Discovery，GVK/scope/verbs 在获取描述后、Create 前检查；其余资源 schema/名称合法性由 API Server 校验。INSERT 只发送一次 Create，不提前 GET，不自动 UPDATE、删除重建或重试。
@@ -233,7 +233,7 @@ go test -tags=e2e -count=1 -v ./test/e2e
 ```
 
 默认 `go test ./...` 不运行 E2E。显式启用时若缺少上述配置会失败，不把未运行当作通过。
-E2E 仅接受明确的 `kubesql-test` context，拒绝覆盖测试所用的既有命名空间（sql-easy-select、sql-easy-where、sql-medium-write、sql-medium-delete、sql-medium-insert、sql-medium-insert-ingress、sql-hard-native、sql-hard-metrics）。
+E2E 仅接受明确的 `kubesql-test` context，拒绝覆盖测试所用的既有命名空间（sql-easy-select、sql-easy-where、sql-medium-write、sql-medium-delete、sql-medium-insert、sql-medium-insert-ingress、sql-hard-native、sql-hard-metrics、sql-hard-crd、sql-hard-cluster-crd）。CRD 套件另外拒绝已有 gadgets.lab.example.com/clusternotes.lab.example.com 定义，清理只针对本套件创建并登记 UID 的 CRD。
 测试通过 Go dynamic client 创建任务书夹具，调用真实 ksql 二进制，按行集合比较结果，最后删除并等待本套件命名空间消失。
 不需要手工提前 apply 夹具；部署副本数按任务书保留，但查询/过滤验收不要求镜像拉取或 Pod Ready。
 第 3 章覆盖 AND/OR 优先级、括号、IS NULL、= NULL，并补充 NOT UNKNOWN 的真实 CLI 用例。
@@ -275,3 +275,28 @@ MINIKUBE_HOME="$PWD/tmp/minikube" KUBECONFIG="$PWD/tmp/kube/config" \
 ```
 
 本次 addon 为 Metrics Server v0.9.0，官方镜像拉取超时，从 `k8s.m.daocloud.io/metrics-server/metrics-server:v0.9.0` 拉取（digest 与 addon 指定值一致），重标记并加载到测试 profile。为使用已加载镜像，仅把本次 addon 的镜像引用从带 digest 改为同版本本地标签；未修改全局镜像源。busybox:1.36 同样经镜像源下载并加载。镜像源为第三方，不保证后续可用。
+
+### CRD、CR 与请求对象（M8）
+
+```sql
+SELECT name, "/spec/size" AS size FROM "lab.example.com/v1/gadgets"
+WHERE "/spec/size" >= 2;
+UPDATE "lab.example.com/v1/gadgets" SET "/spec/size" = 3 WHERE name = 'sample';
+SELECT name, namespace, "/spec/owner" AS owner FROM "lab.example.com/v1/clusternotes";
+
+INSERT INTO "authorization.k8s.io/v1/selfsubjectaccessreviews" (manifest)
+VALUES ('{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectAccessReview","spec":{"resourceAttributes":{"verb":"list","resource":"pods"}}}');
+```
+
+- CRD 本身、陌生 CR 和普通内置资源使用同一 Discovery/dynamic CRUD，不增加专用 Go 类型、不猜 plural，也不假定 spec.replicas 存在。
+- CRD 与实例必须分步创建：等待 CRD Established，再确认目标版本 Discovery 可见，才能创建实例。CLI 不自动编排注册/等待；一条 INSERT 只执行一次 Create。无常驻缓存，每个新 CLI 调用重新发现资源。
+- 测试 8-1 使用 plural=gadgets、kind=Widget，验证过滤、精确更新、未指定 message 保留、INSERT extra 与 DELETE；目标 extra YAML 不提前创建。
+- 测试 8-2 验证 ClusterNote 和 CRD 查询不受无关 namespace 影响，namespace 返回 NULL；另通过 SQL 完成 CRD 本身创建、annotation/versions 更新和删除，以及集群级 CR 创建/更新/删除。
+- 同组多 served version 仍按 preferred/发现顺序选择，显式版本绝不回退。实测在 CRD 上增加 v1beta1 served version（仍只有一个 storage version），简单名返回 v1，精确 v1beta1 返回该版本并可创建实例。
+- schema/不可变字段/RBAC/版本冲突由 API Server 拒绝，保留 Invalid、Forbidden、Conflict 等安全 reason、对象身份及非零退出码，不归类为 SQL 语法错误、不回显字段值。真实测试拒绝 size=0、修改 CRD scope、无权限账号创建和过期 resourceVersion patch；HTTP 模拟逐对象失败后继续。
+- 对 Discovery 宣告 create、但没有 get/list 的请求型 API，不强制 metadata/name，不凭 Kind 名字硬编码 Review 清单。其他可 get/list 的持久化资源仍要求 name；未知资源在预检中暂缓这项判断，实际 Discovery 后、Create 前校验。
+- Review 请求仍检查 JSON、GVK、scope、服务器管理字段及所需 verb。SELECT/UPDATE/DELETE 缺 verb 时返回 E_UNSUPPORTED_VERB；INSERT 返回已有写入汇总（成功是 affected_rows=1），不会把 Review 响应转换为持久化查询结果或返回 allowed 决策。
+- 聚合 API 部分失败使用原 M6 规则：健康精确版本可用，失败组不能假装不存在，简单名不猜歧义；HTTP 验证此边界。没有在真实集群安装额外聚合 API 服务。
+- CRD 测试仅清理自己的定义，UID 前置条件防止误删同名重建对象；不清理已有用户 CRD。RBAC 实测使用本套件 Namespace 中的 ServiceAccount，通过临时 kubeconfig impersonation，不创建全局权限绑定。
+
+第 8 章夹具分别保存在 `testdata/hard-crd/` 与 `testdata/hard-cluster-crd/`，自动 E2E 会按上述顺序准备、验收和清理。默认离线测试不会接触集群；全套 E2E 同样使用前述显式 context/二进制环境变量。

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"slices"
 
 	"github.com/Palm0palM/kubesql/internal/resource"
 	"github.com/Palm0palM/kubesql/internal/sql"
@@ -64,11 +65,15 @@ func BindInsert(stmt *sql.Statement, allNamespaces bool, resolved ...resource.De
 		return nil, manifestError("manifest apiVersion/kind must match the target table")
 	}
 	metadata, ok := object.Object["metadata"].(map[string]any)
-	if !ok {
+	// Unknown resources defer the persistent/request distinction until Discovery.
+	// A create-only API (no get/list) submits a request, not a named stored object.
+	deferred := kind == "" && t.verbs == nil
+	requestOnly := t.verbs != nil && !slices.Contains(t.verbs, "get") && !slices.Contains(t.verbs, "list")
+	if _, exists := object.Object["metadata"]; exists && !ok {
 		return nil, manifestError("manifest requires object metadata")
 	}
 	name, ok := metadata["name"].(string)
-	if !ok || name == "" {
+	if !deferred && !requestOnly && (!ok || name == "") {
 		return nil, manifestError("manifest requires nonempty metadata.name; generateName is unsupported")
 	}
 	if _, exists := metadata["generateName"]; exists {
@@ -88,7 +93,7 @@ func BindInsert(stmt *sql.Statement, allNamespaces bool, resolved ...resource.De
 			return nil, manifestError("metadata.namespace must be a string")
 		}
 		if !t.namespaced && ns != "" {
-			return nil, &Error{Code: "E_NAMESPACE", Message: "Namespace manifest must not specify a nonempty namespace"}
+			return nil, &Error{Code: "E_NAMESPACE", Message: "cluster-scoped manifest must not specify a nonempty namespace"}
 		}
 	}
 	return &Insert{table: t, object: object}, nil

@@ -1,0 +1,6 @@
+apiVersion: lab.example.com/v1
+kind: ClusterNote
+metadata:
+  name: cluster-note
+spec:
+  owner: platform
