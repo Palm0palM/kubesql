@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: measure
+  namespace: ksql-live
+spec:
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["sh", "-c", "sleep 3600"]
+    - name: sidecar
+      image: busybox:1.36
+      command: ["sh", "-c", "sleep 3600"]
